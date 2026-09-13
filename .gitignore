@@ -14,3 +14,6 @@ bump.log
 bump_state.json
 launchd.out.log
 launchd.err.log
+
+# сопроводительное письмо: личные контакты
+letter.txt

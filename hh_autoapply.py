@@ -42,12 +42,38 @@ DRY_RUN = _flag("DRY_RUN", "True")   # True = только ходит и лог�
 # пока не включишь SEND_LETTER.
 SEND_LETTER = _flag("SEND_LETTER", "False")
 
-LETTER = """Здравствуйте!
+# Текст сопроводительного письма лежит в letter.txt рядом со скриптом и
+# не коммитится: там личные контакты. Шаблон — letter.example.txt.
+# Поддерживаются подстановки {title} и {company}, но они необязательны.
+LETTER_FILE = Path(__file__).with_name("letter.txt")
+
+DEFAULT_LETTER = """Здравствуйте!
 
 Меня заинтересовала вакансия «{title}» в {company}. Мой опыт хорошо подходит под ваши задачи, подробности в резюме.
 
 Буду рад обсудить.
 """
+
+
+def _load_letter():
+    try:
+        text = LETTER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return DEFAULT_LETTER
+    return text or DEFAULT_LETTER
+
+
+LETTER = _load_letter()
+
+
+def render_letter(title, company):
+    """Подставить название и компанию. Письмо без подстановок вернётся как есть,
+    кривые фигурные скобки в тексте не должны ронять отклик."""
+    try:
+        return LETTER.format(title=title or "ваша вакансия",
+                             company=company or "вашей компании").strip()
+    except (KeyError, IndexError, ValueError):
+        return LETTER.strip()
 
 # селекторы hh (data-qa). Если что-то перестало находиться, открой DevTools и поправь здесь
 SEL = {
@@ -200,8 +226,7 @@ def apply(page, url):
     if "vacancy_response" in page.url or page.locator(SEL["task"]).count():
         return "questions", title, company
 
-    letter = LETTER.format(title=title or "ваша вакансия",
-                           company=company or "вашей компании").strip()
+    letter = render_letter(title, company)
     letter_sent = False
 
     submit = page.locator(SEL["popup_submit"])
