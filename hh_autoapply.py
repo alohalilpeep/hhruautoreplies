@@ -179,6 +179,19 @@ def collect(page):
     return found
 
 
+def visible(page, sel):
+    """Элемент есть И показан. hh держит предупреждения в DOM всегда, схлопывая
+    их в max-height:0, поэтому одного .count() недостаточно."""
+    loc = page.locator(sel)
+    return bool(loc.count()) and loc.first.is_visible()
+
+
+def visible_text(page, pattern):
+    """То же для поиска по тексту."""
+    loc = page.get_by_text(pattern)
+    return bool(loc.count()) and loc.first.is_visible()
+
+
 def close_popup(page):
     """Закрыть попап отклика, ничего не отправляя."""
     btn = page.locator(SEL["popup_close"])
@@ -236,14 +249,15 @@ def apply(page, url):
             scope.get_by_text(RESUME_TITLE, exact=False).first.click()
             pause(0.5, 1.5)
 
-        # резюме скрыто от работодателей, отклик не примут: не трогаем
-        if page.locator(SEL["hidden_resume"]).count():
+        # резюме скрыто от работодателей, отклик не примут: не трогаем.
+        # Блок всегда есть в DOM и схлопнут, поэтому проверяем видимость.
+        if visible(page, SEL["hidden_resume"]):
             close_popup(page)
             return "resume_hidden", title, company
 
         # письмо обязательно, а мы сейчас откликаемся без него: закрываем попап
         # и откладываем вакансию, ничего не отправив
-        if not SEND_LETTER and page.get_by_text(LETTER_REQUIRED_RE).count():
+        if not SEND_LETTER and visible_text(page, LETTER_REQUIRED_RE):
             close_popup(page)
             return "needs_letter", title, company
 
