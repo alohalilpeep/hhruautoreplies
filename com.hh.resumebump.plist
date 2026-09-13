@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hh.resumebump</string>
+
+    <!-- Пути абсолютные: launchd не знает про venv и cwd.
+         Если проект лежит не здесь, поправь все четыре. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/mr_macbook/Documents/hh_autoreply/venv/bin/python</string>
+        <string>/Users/mr_macbook/Documents/hh_autoreply/hh_resume_bump.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/mr_macbook/Documents/hh_autoreply</string>
+
+    <!-- Раз в 15 минут. Сам подъём всё равно раз в 4 часа: скрипт держит
+         кулдаун в bump_state.json и без надобности браузер не открывает. -->
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/mr_macbook/Documents/hh_autoreply/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/mr_macbook/Documents/hh_autoreply/launchd.err.log</string>
+</dict>
+</plist>

@@ -1,4 +1,4 @@
-venv/
+venv
 __pycache__/
 *.pyc
 
@@ -7,3 +7,9 @@ __pycache__/
 
 # история откликов, локальная база
 hh_responses.db
+
+# логи и состояние подъёма резюме
+bump.log
+bump_state.json
+launchd.out.log
+launchd.err.log
