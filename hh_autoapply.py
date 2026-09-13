@@ -37,6 +37,11 @@ DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит от
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
 DRY_RUN = _flag("DRY_RUN", "True")   # True = только ходит и логирует, не откликается
 
+# False = откликаться без сопроводительного письма. Вакансии, где письмо
+# обязательно, при этом не трогаем: они получают статус needs_letter и ждут,
+# пока не включишь SEND_LETTER.
+SEND_LETTER = _flag("SEND_LETTER", "False")
+
 LETTER = """Здравствуйте!
 
 Меня заинтересовала вакансия «{title}» в {company}. Мой опыт хорошо подходит под ваши задачи, подробности в резюме.
@@ -53,7 +58,10 @@ SEL = {
     "already": '[data-qa="vacancy-response-link-view-topic"]',
     "relocation_confirm": '[data-qa="relocation-warning-confirm"]',
     "task": '[data-qa="task-body"]',
-    "popup": '[data-qa="vacancy-response-popup"]',
+    # попап отклика теперь bottom-sheet, старый vacancy-response-popup не находится
+    "popup": '[data-qa="bottom-sheet-content"]',
+    "popup_close": '[data-qa="response-popup-close"]',
+    "hidden_resume": '[data-qa="hidden-resume-warning"]',
     "popup_submit": '[data-qa="vacancy-response-submit-popup"]',
     "letter_toggle": '[data-qa="vacancy-response-letter-toggle"]',
     "letter_input": '[data-qa="vacancy-response-popup-form-letter-input"]',
@@ -64,6 +72,12 @@ SEL = {
 
 LIMIT_RE = re.compile(r"не более \d+ откликов|лимит откликов", re.I)
 DONE_RE = re.compile(r"Вы откликнулись|Резюме доставлено|Отклик отправлен", re.I)
+# работодатель требует сопроводительное письмо. Формулировка hh в попапе отклика:
+# «Сопроводительное письмо ... Обязательное поле для этой вакансии»
+LETTER_REQUIRED_RE = re.compile(
+    r"обязательное\s+поле\s+для\s+этой\s+вакансии"
+    r"|сопроводительн\w*\s+письмо\s+обязательн"
+    r"|обязательн\w*\s+сопроводительн\w*\s+письмо", re.I)
 
 
 class LimitReached(Exception):
@@ -139,6 +153,16 @@ def collect(page):
     return found
 
 
+def close_popup(page):
+    """Закрыть попап отклика, ничего не отправляя."""
+    btn = page.locator(SEL["popup_close"])
+    if btn.count():
+        btn.first.click()
+    else:
+        page.keyboard.press("Escape")
+    pause(1, 2)
+
+
 def apply(page, url):
     page.goto(url, wait_until="domcontentloaded")
     pause(2, 4)
@@ -186,22 +210,35 @@ def apply(page, url):
             scope = page.locator(SEL["popup"]) if page.locator(SEL["popup"]).count() else page
             scope.get_by_text(RESUME_TITLE, exact=False).first.click()
             pause(0.5, 1.5)
-        toggle = page.locator(SEL["letter_toggle"])
-        if toggle.count():
-            toggle.first.click()
-            pause(0.5, 1.5)
-        area = page.locator(SEL["letter_input"])
-        if area.count():
-            area.first.fill(letter)
-            letter_sent = True
-            pause(1, 2)
+
+        # резюме скрыто от работодателей, отклик не примут: не трогаем
+        if page.locator(SEL["hidden_resume"]).count():
+            close_popup(page)
+            return "resume_hidden", title, company
+
+        # письмо обязательно, а мы сейчас откликаемся без него: закрываем попап
+        # и откладываем вакансию, ничего не отправив
+        if not SEND_LETTER and page.get_by_text(LETTER_REQUIRED_RE).count():
+            close_popup(page)
+            return "needs_letter", title, company
+
+        if SEND_LETTER:
+            toggle = page.locator(SEL["letter_toggle"])
+            if toggle.count():
+                toggle.first.click()
+                pause(0.5, 1.5)
+            area = page.locator(SEL["letter_input"])
+            if area.count():
+                area.first.fill(letter)
+                letter_sent = True
+                pause(1, 2)
         submit.first.click()
         pause(2, 4)
         if page.get_by_text(LIMIT_RE).count():
             raise LimitReached()
 
     # если отклик ушёл без попапа, hh иногда даёт дописать письмо после
-    if not letter_sent:
+    if SEND_LETTER and not letter_sent:
         after = page.locator(SEL["letter_after_input"])
         if after.count() and after.first.is_visible():
             after.first.fill(letter)
@@ -236,8 +273,11 @@ def main():
                 return
 
             vacancies = collect(page)
+            # needs_letter ждёт SEND_LETTER=True, resume_hidden — смены видимости
+            # резюме. Обработанными их не считаем, вернутся на следующем запуске.
             done = {r[0] for r in db.execute(
-                "SELECT id FROM responses WHERE status NOT IN ('error', 'dry_run')")}
+                "SELECT id FROM responses WHERE status NOT IN "
+                "('error', 'dry_run', 'needs_letter', 'resume_hidden')")}
             todo = [(vid, url) for vid, url in vacancies.items() if vid not in done]
             print(f"Найдено {len(vacancies)}, новых {len(todo)}")
 
