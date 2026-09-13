@@ -152,7 +152,10 @@ SEL = {
     "popup_submit": '[data-qa="vacancy-response-submit-popup"]',
     "letter_toggle": '[data-qa="vacancy-response-letter-toggle"]',
     "letter_input": '[data-qa="vacancy-response-popup-form-letter-input"]',
-    "letter_after_input": '[data-qa="vacancy-response-letter-informer"] textarea',
+    # письмо после мгновенного отклика: hh показывает кнопку прямо на вакансии,
+    # по ней открывается та же форма письма, что и в попапе
+    "letter_after_toggle": '[data-qa="responded-success-attach-cover-letter"]',
+    "letter_after_input": '[data-qa="vacancy-response-popup-form-letter-input"]',
     "letter_after_submit": '[data-qa="vacancy-response-letter-submit"]',
     "login_link": '[data-qa="login"]',
 }
@@ -338,14 +341,21 @@ def apply(page, url):
         if page.get_by_text(LIMIT_RE).count():
             raise LimitReached()
 
-    # если отклик ушёл без попапа, hh иногда даёт дописать письмо после
+    # Отклик ушёл мгновенно, без попапа: письмо прикладываем после. hh рисует
+    # на вакансии кнопку «Приложить сопроводительное письмо», по ней открывается
+    # форма. Без этого клика поля письма на странице просто нет.
     if SEND_LETTER and not letter_sent:
-        after = page.locator(SEL["letter_after_input"])
-        if after.count() and after.first.is_visible():
-            after.first.fill(letter)
+        toggle_after = visible(page, SEL["letter_after_toggle"])
+        if toggle_after:
+            page.locator(SEL["letter_after_toggle"]).first.click()
             pause(1, 2)
-            page.locator(SEL["letter_after_submit"]).first.click()
-            pause(1, 2)
+            after = page.locator(SEL["letter_after_input"])
+            if after.count() and after.first.is_visible():
+                after.first.fill(letter)
+                pause(1, 2)
+                page.locator(SEL["letter_after_submit"]).first.click()
+                pause(2, 3)
+                letter_sent = True
 
     if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
         return "applied", title, company
