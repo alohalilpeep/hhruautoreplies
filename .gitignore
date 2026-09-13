@@ -1,6 +1,7 @@
 venv
 __pycache__/
 *.pyc
+.claude/
 
 # личные настройки: ID профиля, лимиты, URL поиска
 .env
