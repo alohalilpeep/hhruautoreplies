@@ -105,6 +105,83 @@ def clean_title(title):
     return re.sub(r"\s+", " ", title).strip()
 
 
+CYR_RE = re.compile(r"[а-яё]", re.I)
+
+
+def _gen_noun(word):
+    """Существительное мужского рода в родительный падеж."""
+    low = word.lower()
+    if low.endswith(("ь", "й")):
+        return word[:-1] + "я"        # руководитель -> руководителя
+    if low.endswith("а"):
+        return word[:-1] + "ы"        # редко, но пусть будет
+    if low.endswith(("о", "е", "ы", "и")):
+        return word                   # уже не именительный, не трогаем
+    return word + "а"                 # инженер -> инженера
+
+
+def _gen_adj(word):
+    """Прилагательное мужского рода в родительный падеж."""
+    low = word.lower()
+    if low.endswith("ий"):
+        return word[:-2] + "его"      # ведущий -> ведущего
+    if low.endswith(("ый", "ой")):
+        return word[:-2] + "ого"      # системный -> системного, сетевой -> сетевого
+    return word
+
+
+def _is_adj(word):
+    return CYR_RE.search(word) and word.lower().endswith(("ый", "ий", "ой"))
+
+
+# после предлога идёт зависимая часть, она уже в нужном падеже
+PREPOSITIONS = {"в", "во", "на", "по", "для", "с", "со", "из", "от", "при",
+                "до", "за", "к", "о", "об", "и"}
+
+
+def _gen_token(word, as_adj):
+    """Склонить слово, в том числе составное через дефис.
+    «инженер-программист» -> обе части, «DevOps-инженер» -> только русскую."""
+    if not CYR_RE.search(word):
+        return word                   # латиница и цифры как есть
+    if "-" in word:
+        parts = [_gen_noun(p) if CYR_RE.search(p) else p
+                 for p in word.split("-")]
+        return "-".join(parts)
+    return _gen_adj(word) if as_adj else _gen_noun(word)
+
+
+def to_genitive(title):
+    """Название должности в родительный падеж: «заинтересовала вакансия X».
+
+    Склоняем только ведущую группу «прилагательные + первое существительное».
+    Всё, что идёт дальше, у hh уже стоит в нужном падеже и трогать его нельзя:
+    «руководитель направления DevOps», «инженер по инфраструктуре».
+    Чисто латинские названия возвращаются без изменений.
+    """
+    # «пентестер - исследователь»: дефис с пробелами это одно слово
+    title = re.sub(r"\s+-\s+", "-", title)
+    tokens = title.split()
+    out, noun_done = [], False
+    for tok in tokens:
+        if tok.lower() in PREPOSITIONS:
+            out.append(tok)           # сам предлог не склоняем,
+            noun_done = True          # и всё после него тоже
+            continue
+        if noun_done or not CYR_RE.search(tok):
+            out.append(tok)           # латиница-модификатор или хвост
+            continue
+        if _is_adj(tok):
+            out.append(_gen_token(tok, as_adj=True))
+        else:
+            out.append(_gen_token(tok, as_adj=False))
+            noun_done = True
+    result = " ".join(out)
+    if result and CYR_RE.match(result[0]):
+        result = result[0].lower() + result[1:]   # середина предложения
+    return result
+
+
 MIN_TITLE_LEN = 5
 # короткие, но настоящие должности: длиной их не отфильтруешь
 SHORT_ROLE_OK = {"sre", "qa", "noc", "devops", "mlops", "devsecops", "sysops"}
@@ -112,8 +189,10 @@ SHORT_ROLE_OK = {"sre", "qa", "noc", "devops", "mlops", "devsecops", "sysops"}
 BARE_TECH = {"python", "java", "golang", "go", "php", "linux", "kubernetes",
              "javascript", "typescript", "node.js", "react", "c++", "c#", ".net",
              "bash", "docker", "terraform", "ansible"}
-# чем заменить «{title}», когда подставлять нечего
-NO_TITLE_PHRASE = "в вашей компании"
+# когда подставлять нечего, убираем вместе с предшествующим «вакансия»,
+# иначе выйдет «заинтересовала вакансия ваша вакансия»
+NO_TITLE_RE = re.compile(r"(?:вакансия|позиция)\s+[«\"']?\{title\}[»\"']?", re.I)
+NO_TITLE_PHRASE = "ваша вакансия"
 
 
 def usable_title(title):
@@ -133,8 +212,12 @@ def render_letter(title, company):
     """Подставить название и компанию. Письмо без подстановок вернётся как есть,
     кривые фигурные скобки в тексте не должны ронять отклик."""
     text = LETTER
-    if not usable_title(title):
-        # убираем вместе с кавычками, иначе выйдет «позиция «ваша вакансия»»
+    if usable_title(title):
+        title = to_genitive(title)   # «вакансия системного администратора»
+    elif NO_TITLE_RE.search(text):
+        text = NO_TITLE_RE.sub(NO_TITLE_PHRASE, text)
+        title = ""
+    else:
         text = re.sub(r"[«\"']?\{title\}[»\"']?", NO_TITLE_PHRASE, text)
         title = ""
     try:
@@ -152,6 +235,7 @@ SEL = {
     "already": '[data-qa="vacancy-response-link-view-topic"]',
     "relocation_confirm": '[data-qa="relocation-warning-confirm"]',
     "task": '[data-qa="task-body"]',
+    "task_question": '[data-qa="task-question"]',
     # попап отклика теперь bottom-sheet, старый vacancy-response-popup не находится
     "popup": '[data-qa="bottom-sheet-content"]',
     "popup_close": '[data-qa="response-popup-close"]',
@@ -211,7 +295,23 @@ def init_db():
     db = sqlite3.connect("hh_responses.db")
     db.execute("""CREATE TABLE IF NOT EXISTS responses (
         id TEXT PRIMARY KEY, url TEXT, title TEXT, company TEXT, status TEXT, ts TEXT)""")
+    # пул вопросов работодателей: копится сам, пока скрипт откладывает questions
+    db.execute("""CREATE TABLE IF NOT EXISTS questions (
+        vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
+        question TEXT, kind TEXT, options TEXT, ts TEXT,
+        PRIMARY KEY (vacancy_id, idx))""")
     return db
+
+
+def save_questions(db, vid, url, company, questions):
+    """Сложить вопросы работодателя в пул. Отклик при этом не отправляется."""
+    ts = dt.datetime.now().isoformat(timespec="seconds")
+    for i, q in enumerate(questions):
+        db.execute(
+            "INSERT OR REPLACE INTO questions VALUES (?,?,?,?,?,?,?,?)",
+            (vid, url, company, i, q["question"], q["kind"],
+             " | ".join(q["options"]), ts))
+    db.commit()
 
 
 def save(db, vid, url, title, company, status):
@@ -263,6 +363,36 @@ def visible_text(page, pattern):
     return bool(loc.count()) and loc.first.is_visible()
 
 
+def scrape_questions(page):
+    """Снять вопросы работодателя со страницы отклика. Ничего не отправляет.
+
+    Текст лежит в task-question, а поле ответа рядом, внутри общего task-body,
+    поэтому за единицу берём task-body и ищем вопрос внутри него.
+    """
+    try:
+        return page.evaluate("""() => {
+            const bodies = [...document.querySelectorAll('[data-qa="task-body"]')];
+            return bodies.map(b => {
+                const q = b.querySelector('[data-qa="task-question"]') || b;
+                const inputs = [...b.querySelectorAll('input, textarea, select')];
+                const kinds = [...new Set(inputs.map(i =>
+                    i.tagName === 'TEXTAREA' ? 'textarea'
+                    : i.tagName === 'SELECT' ? 'select'
+                    : (i.type || 'text')))];
+                const opts = [...b.querySelectorAll('label')]
+                    .map(l => (l.innerText || '').trim())
+                    .filter(Boolean);
+                return {
+                    question: (q.innerText || '').trim(),
+                    kind: kinds.join(',') || 'unknown',
+                    options: opts.slice(0, 12)
+                };
+            }).filter(q => q.question);
+        }""")
+    except Exception:
+        return []
+
+
 def close_popup(page):
     """Закрыть попап отклика, ничего не отправляя."""
     btn = page.locator(SEL["popup_close"])
@@ -273,7 +403,7 @@ def close_popup(page):
     pause(1, 2)
 
 
-def apply(page, url):
+def apply(page, url, db=None):
     page.goto(url, wait_until="domcontentloaded")
     pause(2, 4)
     title = text_or(page, SEL["title"])
@@ -306,8 +436,15 @@ def apply(page, url):
         reloc.first.click()
         pause(1, 2)
 
-    # вакансия с вопросами или тестом, оставляем на ручной разбор
+    # вакансия с вопросами или тестом, оставляем на ручной разбор.
+    # Заодно складываем вопросы в пул: их видно только отсюда.
     if "vacancy_response" in page.url or page.locator(SEL["task"]).count():
+        if db is not None:
+            qs = scrape_questions(page)
+            if qs:
+                m = re.search(r"/vacancy/(\d+)", url)
+                save_questions(db, m.group(1) if m else url, url, company, qs)
+                print(f"    собрано вопросов: {len(qs)}")
         return "questions", title, company
 
     # в базу пишем сырой заголовок, в письмо — очищенный
@@ -408,7 +545,7 @@ def main():
                     print("Свой дневной лимит достигнут")
                     break
                 try:
-                    status, title, company = apply(page, url)
+                    status, title, company = apply(page, url, db)
                 except LimitReached:
                     print("hh пишет, что лимит откликов исчерпан")
                     break
