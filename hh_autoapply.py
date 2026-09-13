@@ -37,10 +37,17 @@ DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит от
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
 DRY_RUN = _flag("DRY_RUN", "True")   # True = только ходит и логирует, не откликается
 
-# False = откликаться без сопроводительного письма. Вакансии, где письмо
-# обязательно, при этом не трогаем: они получают статус needs_letter и ждут,
-# пока не включишь SEND_LETTER.
-SEND_LETTER = _flag("SEND_LETTER", "False")
+# Что делать с сопроводительным письмом:
+#   never    — не прикладывать никогда. Вакансии, где письмо обязательно,
+#              не трогаем: статус needs_letter, ждут смены режима.
+#   required — прикладывать только там, где работодатель требует. На остальные
+#              откликаемся одним резюме.
+#   always   — прикладывать везде, в том числе дописывать после мгновенного
+#              отклика через «Приложить сопроводительное письмо».
+LETTER_MODE = os.getenv("LETTER_MODE", "required").strip().lower()
+if LETTER_MODE not in ("never", "required", "always"):
+    raise SystemExit(
+        f"LETTER_MODE={LETTER_MODE!r} — допустимо never, required или always")
 
 # Текст сопроводительного письма лежит в letter.txt рядом со скриптом и
 # не коммитится: там личные контакты. Шаблон — letter.example.txt.
@@ -320,13 +327,16 @@ def apply(page, url):
             close_popup(page)
             return "resume_hidden", title, company
 
-        # письмо обязательно, а мы сейчас откликаемся без него: закрываем попап
+        letter_required = visible_text(page, LETTER_REQUIRED_RE)
+
+        # письмо обязательно, а режим его запрещает: закрываем попап
         # и откладываем вакансию, ничего не отправив
-        if not SEND_LETTER and visible_text(page, LETTER_REQUIRED_RE):
+        if letter_required and LETTER_MODE == "never":
             close_popup(page)
             return "needs_letter", title, company
 
-        if SEND_LETTER:
+        # пишем, только если работодатель требует или режим always
+        if letter_required or LETTER_MODE == "always":
             toggle = page.locator(SEL["letter_toggle"])
             if toggle.count():
                 toggle.first.click()
@@ -341,10 +351,11 @@ def apply(page, url):
         if page.get_by_text(LIMIT_RE).count():
             raise LimitReached()
 
-    # Отклик ушёл мгновенно, без попапа: письмо прикладываем после. hh рисует
-    # на вакансии кнопку «Приложить сопроводительное письмо», по ней открывается
+    # Отклик ушёл мгновенно, без попапа. Здесь письмо работодателем не требуется
+    # (иначе hh показал бы попап), поэтому дописываем только в режиме always.
+    # hh рисует кнопку «Приложить сопроводительное письмо», по ней открывается
     # форма. Без этого клика поля письма на странице просто нет.
-    if SEND_LETTER and not letter_sent:
+    if LETTER_MODE == "always" and not letter_sent:
         toggle_after = visible(page, SEL["letter_after_toggle"])
         if toggle_after:
             page.locator(SEL["letter_after_toggle"]).first.click()
