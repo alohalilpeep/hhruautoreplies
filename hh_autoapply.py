@@ -66,14 +66,75 @@ def _load_letter():
 LETTER = _load_letter()
 
 
+# грейд в начале названия: «Middle DevOps-инженер» -> «DevOps-инженер»
+GRADE_RE = re.compile(
+    r"^(младш\w*|старш\w*|ведущ\w*|главн\w*|стаж[ёе]р\w*"
+    r"|junior|middle|senior|lead|jun|mid|sr|jr)\b[\s.\-–—]*", re.I)
+
+
+def _strip_grade(text):
+    t = re.sub(r"\s+", " ", text).strip(" .,-–—+")
+    prev = None
+    while prev != t:                             # «Ведущий старший инженер»
+        prev = t
+        t = GRADE_RE.sub("", t).strip(" .,-–—+")
+    if t and t[0].islower():
+        t = t[0].upper() + t[1:]
+    return t
+
+
+def clean_title(title):
+    """Название вакансии для письма. hh кладёт в заголовок грейд, стек в скобках,
+    город, сроки проекта, альтернативы через слэш и слоган компании после «|».
+    В письме нужно только само название должности."""
+    base = title.split("|")[0]                       # «... | Компания | слоган»
+    base = re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", base)  # «(Linux)», «[МТС]»
+    # «Senior/Middle Python»: до слэша один грейд, после очистки пусто —
+    # тогда берём строку целиком, без разбиения по слэшу
+    for candidate in (base.split("/")[0], base.replace("/", " ")):
+        cleaned = _strip_grade(candidate)
+        if cleaned:
+            return cleaned
+    return re.sub(r"\s+", " ", title).strip()
+
+
+MIN_TITLE_LEN = 5
+# короткие, но настоящие должности: длиной их не отфильтруешь
+SHORT_ROLE_OK = {"sre", "qa", "noc", "devops", "mlops", "devsecops", "sysops"}
+# голое название технологии это не должность: «позиция «Python»» читается плохо
+BARE_TECH = {"python", "java", "golang", "go", "php", "linux", "kubernetes",
+             "javascript", "typescript", "node.js", "react", "c++", "c#", ".net",
+             "bash", "docker", "terraform", "ansible"}
+# чем заменить «{title}», когда подставлять нечего
+NO_TITLE_PHRASE = "в вашей компании"
+
+
+def usable_title(title):
+    """Годится ли очищенное название, чтобы вставить его в кавычках в письмо."""
+    t = (title or "").strip()
+    if not t:
+        return False
+    low = t.lower()
+    if low in BARE_TECH:
+        return False
+    if low in SHORT_ROLE_OK:
+        return True
+    return len(t) >= MIN_TITLE_LEN
+
+
 def render_letter(title, company):
     """Подставить название и компанию. Письмо без подстановок вернётся как есть,
     кривые фигурные скобки в тексте не должны ронять отклик."""
+    text = LETTER
+    if not usable_title(title):
+        # убираем вместе с кавычками, иначе выйдет «позиция «ваша вакансия»»
+        text = re.sub(r"[«\"']?\{title\}[»\"']?", NO_TITLE_PHRASE, text)
+        title = ""
     try:
-        return LETTER.format(title=title or "ваша вакансия",
-                             company=company or "вашей компании").strip()
+        return text.format(title=title,
+                           company=company or "вашей компании").strip()
     except (KeyError, IndexError, ValueError):
-        return LETTER.strip()
+        return text.strip()
 
 # селекторы hh (data-qa). Если что-то перестало находиться, открой DevTools и поправь здесь
 SEL = {
@@ -239,7 +300,8 @@ def apply(page, url):
     if "vacancy_response" in page.url or page.locator(SEL["task"]).count():
         return "questions", title, company
 
-    letter = render_letter(title, company)
+    # в базу пишем сырой заголовок, в письмо — очищенный
+    letter = render_letter(clean_title(title), company)
     letter_sent = False
 
     submit = page.locator(SEL["popup_submit"])
