@@ -316,6 +316,38 @@ def normalize_question(text):
     return re.sub(r"\s+", " ", t).strip()
 
 
+BLACKLIST_FILE = Path(__file__).with_name("blacklist.txt")
+
+
+def load_blacklist():
+    """Компании, которым не откликаемся. Совпадение по части названия."""
+    try:
+        raw = BLACKLIST_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [l.strip().lower() for l in raw.splitlines()
+            if l.strip() and not l.startswith("#")]
+
+
+BLACKLIST = load_blacklist()
+
+
+def is_blacklisted(company):
+    low = (company or "").lower()
+    return bool(low) and any(b in low for b in BLACKLIST)
+
+
+def load_skipped_questions(db):
+    """Вопросы, помеченные skip: вакансии с ними не трогаем."""
+    if db is None:
+        return set()
+    try:
+        return {q for (q,) in db.execute(
+            "SELECT qnorm FROM answer_bank WHERE status='skip'")}
+    except sqlite3.OperationalError:
+        return set()
+
+
 def load_answer_bank(db):
     """Одобренные вручную ответы. Ключ — нормализованный вопрос."""
     if db is None:
@@ -579,6 +611,10 @@ def apply(page, url, db=None):
     title = text_or(page, SEL["title"])
     company = text_or(page, SEL["company"])
 
+    # компания в стоп-листе: не откликаемся, ничего не кликаем
+    if is_blacklisted(company):
+        return "blacklisted", title, company
+
     if page.locator(SEL["already"]).count():
         return "already", title, company
     btn = page.locator(SEL["apply_btn"]).first
@@ -614,6 +650,12 @@ def apply(page, url, db=None):
             m = re.search(r"/vacancy/(\d+)", url)
             save_questions(db, m.group(1) if m else url, url, company, qs)
             print(f"    собрано вопросов: {len(qs)}")
+        # среди вопросов есть отброшенный вручную — вакансия не наша
+        dropped = load_skipped_questions(db)
+        if dropped and any(normalize_question(q["question"]) in dropped
+                           for q in qs):
+            return "skipped_question", title, company
+
         answered = answer_questions(page, qs, load_answer_bank(db))
         if answered:
             print(f"    анкета заполнена, вопросов: {len(qs)}")

@@ -41,7 +41,10 @@ STATUS_WORDS = {
     "approved": {"approved", "готов", "готово", "ok", "ок", "да", "+"},
     "draft": {"draft", "черновик", "-"},
     "needs_input": {"needs_input", "нужен", "надо", "?"},
+    "skip": {"skip", "пропуск", "нет", "мимо", "х"},
 }
+
+BLACKLIST_FILE = Path(__file__).with_name("blacklist.txt")
 
 HEADER = """\
 # Ответы на вопросы работодателей. Экспорт из hh_responses.db.
@@ -50,10 +53,19 @@ HEADER = """\
 # Строку «ID:» не трогай — по ней ответ возвращается на место.
 # Блоки разделены строкой из трёх дефисов. Порядок блоков не важен.
 #
+# УДАЛИТЬ БЛОК = больше не откликаться на вакансии с этим вопросом.
+# Вопрос уходит в статус skip, вакансия пропускается целиком и навсегда.
+# Считаются только блоки, выгруженные в ЭТОТ файл (список ниже, в EXPORTED),
+# так что частичная выгрузка ничего лишнего не удалит.
+#
+# Компанию целиком блокируй в blacklist.txt — одна строка на компанию,
+# совпадение по части названия. Или: hh_answers.py --block "Название"
+#
 # СТАТУС:
 #   approved    ответ уйдёт работодателю   (синонимы: готов, ок, да, +)
 #   draft       черновик, не отправляется  (синонимы: черновик, -)
 #   needs_input нужен твой ответ           (синонимы: нужен, ?)
+#   skip        не откликаться на такие вакансии
 #
 # Ответ может быть в несколько строк — читается всё до следующего разделителя.
 # Вернуть в базу:  venv/bin/python hh_answers.py --import
@@ -84,7 +96,13 @@ def export(db, path=EDIT_FILE):
     order = {"needs_input": 0, "draft": 1, "approved": 2}
     rows.sort(key=lambda r: (order.get(r[3], 3), r[1]))
 
-    chunks = [HEADER]
+    # список выгруженных ID: по нему импорт поймёт, какие блоки удалены,
+    # и не примет за удаление то, что просто не выгружалось
+    ids = [qid(qn) for qn, *_ in rows]
+    exported = "\n".join(
+        "# EXPORTED: " + " ".join(ids[i:i + 8]) for i in range(0, len(ids), 8))
+
+    chunks = [HEADER + exported + "\n"]
     for qnorm, question, answer, status in rows:
         flat = re.sub(r"\s+", " ", (question or "").replace("\xa0", " ")).strip()
         wrapped = textwrap.fill(flat, width=96, subsequent_indent="        ")
@@ -124,6 +142,13 @@ def import_(db, path=EDIT_FILE):
     text = path.read_text(encoding="utf-8")
     blocks = re.split(rf"^{SEP}\s*$", text, flags=re.M)
 
+    # что было выгружено в этот файл — база для вычисления удалённого
+    exported_ids = set()
+    for line in text.splitlines():
+        if line.startswith("# EXPORTED:"):
+            exported_ids.update(line.split(":", 1)[1].split())
+
+    present_ids = set()
     updated, skipped, unknown, bad_status = 0, 0, [], []
     for block in blocks:
         lines = block.splitlines()
@@ -144,6 +169,7 @@ def import_(db, path=EDIT_FILE):
         ident = fields.get("ID", "").strip()
         if not ident:
             continue
+        present_ids.add(ident)
         qnorm = by_id.get(ident)
         if not qnorm:
             unknown.append(ident)
@@ -168,9 +194,24 @@ def import_(db, path=EDIT_FILE):
             updated += 1
         else:
             skipped += 1
+    # блоки, которые были выгружены, но в файле их больше нет = удалены
+    deleted = [by_id[i] for i in sorted(exported_ids - present_ids) if i in by_id]
+    for qnorm in deleted:
+        db.execute(
+            "UPDATE answer_bank SET status='skip', ts=? WHERE qnorm=?",
+            (dt.datetime.now().isoformat(timespec="seconds"), qnorm))
     db.commit()
 
     print(f"обновлено: {updated}, без изменений: {skipped}")
+    if deleted:
+        print(f"\nудалено из файла → больше не откликаемся ({len(deleted)}):")
+        for qnorm in deleted[:12]:
+            q = db.execute("SELECT question FROM answer_bank WHERE qnorm=?",
+                           (qnorm,)).fetchone()[0]
+            flat = re.sub(r"\s+", " ", q or "").strip()
+            print(f"  • {flat[:95]}")
+        if len(deleted) > 12:
+            print(f"  ... ещё {len(deleted) - 12}")
     if unknown:
         print(f"\nнеизвестные ID ({len(unknown)}) — пропущены: {unknown[:10]}")
     if bad_status:
@@ -260,9 +301,33 @@ def stats(db):
         print(f"  {c} — {n} вопр.")
 
 
+def block_company(name):
+    """Добавить компанию в стоп-лист. Совпадение по части названия."""
+    name = name.strip()
+    if not name:
+        raise SystemExit("укажи название: --block \"Название компании\"")
+    existing = []
+    if BLACKLIST_FILE.exists():
+        existing = [l.strip() for l in
+                    BLACKLIST_FILE.read_text(encoding="utf-8").splitlines()]
+    if any(l.lower() == name.lower() for l in existing if l):
+        print(f"{name!r} уже в стоп-листе")
+        return
+    with BLACKLIST_FILE.open("a", encoding="utf-8") as f:
+        if not existing:
+            f.write("# Компании, которым не откликаемся. Одна строка на компанию,\n"
+                    "# совпадение по части названия, регистр не важен.\n")
+        f.write(name + "\n")
+    print(f"{name!r} добавлена в {BLACKLIST_FILE.name}")
+
+
 def main():
     db = init_db()
     args = sys.argv[1:]
+    if "--block" in args:
+        i = args.index("--block")
+        block_company(" ".join(args[i + 1:]))
+        return
     path = EDIT_FILE
     for a in args:
         if a.endswith(".txt"):
