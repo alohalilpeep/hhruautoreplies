@@ -308,6 +308,26 @@ def is_compound(text):
             or bool(SECOND_ASK_RE.search(flat)))
 
 
+def normalize_question(text):
+    """Ключ для банка ответов: без регистра, пунктуации и лишних пробелов,
+    чтобы один и тот же вопрос у разных работодателей нашёлся."""
+    t = (text or "").lower().replace("\xa0", " ")
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def load_answer_bank(db):
+    """Одобренные вручную ответы. Ключ — нормализованный вопрос."""
+    if db is None:
+        return {}
+    try:
+        rows = db.execute(
+            "SELECT qnorm, answer FROM answer_bank WHERE status='approved'")
+    except sqlite3.OperationalError:
+        return {}
+    return {q: a for q, a in rows if a and a.strip()}
+
+
 def classify_question(text):
     """Тема вопроса или None, если шаблонного ответа для него нет."""
     flat = re.sub(r"\s+", " ", (text or "").replace("\xa0", " "))
@@ -389,6 +409,11 @@ def init_db():
         vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
         question TEXT, kind TEXT, options TEXT, ts TEXT,
         PRIMARY KEY (vacancy_id, idx))""")
+    # банк готовых ответов: заполняется вручную через hh_answers.py.
+    # Ключ — нормализованный текст вопроса, поэтому повторы переиспользуются.
+    db.execute("""CREATE TABLE IF NOT EXISTS answer_bank (
+        qnorm TEXT PRIMARY KEY, question TEXT, answer TEXT,
+        status TEXT, ts TEXT)""")
     return db
 
 
@@ -485,23 +510,32 @@ def scrape_questions(page):
         return []
 
 
-def answer_questions(page, questions):
+def answer_questions(page, questions, bank=None):
     """Заполнить анкету работодателя и отправить отклик.
 
+    Источники ответа, в порядке приоритета:
+      1. банк одобренных ответов из базы (точный вопрос),
+      2. шаблон по теме из answers.txt (зарплата, город и т.п.).
+
     Возвращает None, если отвечать нельзя — тогда вакансия откладывается как
-    раньше. Отказываемся, если: есть нераспознанный вопрос, на тему нет ответа,
-    поле не текстовое (радиокнопку за человека выбирать нельзя) или число полей
+    раньше. Отказываемся, если: на вопрос нет ни одобренного ответа, ни темы;
+    поле не текстовое (радиокнопку за человека выбирать нельзя); или число полей
     не сошлось с числом вопросов.
     """
-    if not AUTO_ANSWER or not ANSWERS or not questions:
+    if not AUTO_ANSWER or not questions:
         return None
+    bank = bank or {}
 
     plan = []
     for q in questions:
+        if "textarea" not in q["kind"] and "text" not in q["kind"]:
+            return None
+        approved = bank.get(normalize_question(q["question"]))
+        if approved:
+            plan.append(approved)
+            continue
         topic = classify_question(q["question"])
         if not topic or topic not in ANSWERS:
-            return None
-        if "textarea" not in q["kind"] and "text" not in q["kind"]:
             return None
         plan.append(ANSWERS[topic])
 
@@ -580,7 +614,7 @@ def apply(page, url, db=None):
             m = re.search(r"/vacancy/(\d+)", url)
             save_questions(db, m.group(1) if m else url, url, company, qs)
             print(f"    собрано вопросов: {len(qs)}")
-        answered = answer_questions(page, qs)
+        answered = answer_questions(page, qs, load_answer_bank(db))
         if answered:
             print(f"    анкета заполнена, вопросов: {len(qs)}")
             return answered, title, company
