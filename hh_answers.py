@@ -13,18 +13,172 @@
      пока ответ в статусе draft, вакансия просто откладывается.
 
     venv/bin/python hh_answers.py --fill        завести строки под новые вопросы
+    venv/bin/python hh_answers.py --export      выгрузить в answers_edit.txt
+    venv/bin/python hh_answers.py --import      вернуть правки из txt в базу
     venv/bin/python hh_answers.py --list        показать банк
     venv/bin/python hh_answers.py --list draft  только неготовые
-    venv/bin/python hh_answers.py --approve-all пометить готовыми все непустые
-    venv/bin/python hh_answers.py --stats       сводка
+    venv/bin/python hh_answers.py --approve-all пометить готовыми черновики
+    venv/bin/python hh_answers.py               сводка
+
+Обычный цикл: --fill → --export → правишь txt → --import
 """
 import datetime as dt
+import hashlib
+import re
 import sqlite3
 import sys
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from hh_autoapply import init_db, normalize_question, classify_question
+
+EDIT_FILE = Path(__file__).with_name("answers_edit.txt")
+SEP = "-" * 3
+
+# что писать в СТАТУС. Первое значение — каноническое, остальные синонимы
+STATUS_WORDS = {
+    "approved": {"approved", "готов", "готово", "ok", "ок", "да", "+"},
+    "draft": {"draft", "черновик", "-"},
+    "needs_input": {"needs_input", "нужен", "надо", "?"},
+}
+
+HEADER = """\
+# Ответы на вопросы работодателей. Экспорт из hh_responses.db.
+#
+# Правь ТОЛЬКО текст после «ОТВЕТ:» и, если нужно, строку «СТАТУС:».
+# Строку «ID:» не трогай — по ней ответ возвращается на место.
+# Блоки разделены строкой из трёх дефисов. Порядок блоков не важен.
+#
+# СТАТУС:
+#   approved    ответ уйдёт работодателю   (синонимы: готов, ок, да, +)
+#   draft       черновик, не отправляется  (синонимы: черновик, -)
+#   needs_input нужен твой ответ           (синонимы: нужен, ?)
+#
+# Ответ может быть в несколько строк — читается всё до следующего разделителя.
+# Вернуть в базу:  venv/bin/python hh_answers.py --import
+"""
+
+
+def qid(qnorm):
+    """Короткий стабильный якорь вопроса для txt-файла."""
+    return hashlib.sha1(qnorm.encode("utf-8")).hexdigest()[:8]
+
+
+def companies_for(db):
+    """Кто спрашивал каждый вопрос. Один вопрос встречается у разных компаний."""
+    out = {}
+    for company, question in db.execute(
+            "SELECT company, question FROM questions"):
+        out.setdefault(normalize_question(question), []).append(
+            (company or "").strip() or "?")
+    return {k: sorted(set(v)) for k, v in out.items()}
+
+
+def export(db, path=EDIT_FILE):
+    comps = companies_for(db)
+    rows = db.execute(
+        "SELECT qnorm, question, answer, status FROM answer_bank"
+    ).fetchall()
+    # сначала то, что требует внимания
+    order = {"needs_input": 0, "draft": 1, "approved": 2}
+    rows.sort(key=lambda r: (order.get(r[3], 3), r[1]))
+
+    chunks = [HEADER]
+    for qnorm, question, answer, status in rows:
+        flat = re.sub(r"\s+", " ", (question or "").replace("\xa0", " ")).strip()
+        wrapped = textwrap.fill(flat, width=96, subsequent_indent="        ")
+        chunks.append(
+            f"{SEP}\n"
+            f"ID: {qid(qnorm)}\n"
+            f"СТАТУС: {status}\n"
+            f"КОМПАНИЯ: {', '.join(comps.get(qnorm, [])) or '—'}\n"
+            f"ВОПРОС: {wrapped}\n"
+            f"ОТВЕТ:\n"
+            f"{(answer or '').strip()}\n")
+    chunks.append(SEP + "\n")
+
+    path.write_text("\n".join(chunks), encoding="utf-8")
+    counts = {}
+    for *_, status in rows:
+        counts[status] = counts.get(status, 0) + 1
+    print(f"выгружено {len(rows)} вопросов в {path.name}")
+    for s, n in sorted(counts.items()):
+        print(f"  {s:12s} {n}")
+    print(f"\nправь и возвращай:  venv/bin/python hh_answers.py --import")
+
+
+def _parse_status(raw):
+    low = (raw or "").strip().lower()
+    for canon, words in STATUS_WORDS.items():
+        if low in words:
+            return canon
+    return None
+
+
+def import_(db, path=EDIT_FILE):
+    if not path.exists():
+        raise SystemExit(f"нет файла {path.name} — сначала --export")
+
+    by_id = {qid(qn): qn for (qn,) in db.execute("SELECT qnorm FROM answer_bank")}
+    text = path.read_text(encoding="utf-8")
+    blocks = re.split(rf"^{SEP}\s*$", text, flags=re.M)
+
+    updated, skipped, unknown, bad_status = 0, 0, [], []
+    for block in blocks:
+        lines = block.splitlines()
+        fields, answer_lines, in_answer = {}, [], False
+        for line in lines:
+            if in_answer:
+                answer_lines.append(line)
+                continue
+            if line.strip() == "ОТВЕТ:":
+                in_answer = True
+                continue
+            if line.startswith("#") or not line.strip():
+                continue
+            m = re.match(r"^(ID|СТАТУС|КОМПАНИЯ|ВОПРОС):\s*(.*)$", line)
+            if m:
+                fields[m.group(1)] = m.group(2)
+
+        ident = fields.get("ID", "").strip()
+        if not ident:
+            continue
+        qnorm = by_id.get(ident)
+        if not qnorm:
+            unknown.append(ident)
+            continue
+
+        answer = "\n".join(answer_lines).strip()
+        status = _parse_status(fields.get("СТАТУС"))
+        if fields.get("СТАТУС") and status is None:
+            bad_status.append((ident, fields["СТАТУС"].strip()))
+            continue
+        if status == "approved" and not answer:
+            bad_status.append((ident, "approved с пустым ответом"))
+            continue
+
+        cur = db.execute(
+            "UPDATE answer_bank SET answer=?, status=?, ts=? "
+            "WHERE qnorm=? AND (answer IS NOT ? OR status IS NOT ?)",
+            (answer, status or "draft",
+             dt.datetime.now().isoformat(timespec="seconds"),
+             qnorm, answer, status or "draft"))
+        if cur.rowcount:
+            updated += 1
+        else:
+            skipped += 1
+    db.commit()
+
+    print(f"обновлено: {updated}, без изменений: {skipped}")
+    if unknown:
+        print(f"\nнеизвестные ID ({len(unknown)}) — пропущены: {unknown[:10]}")
+    if bad_status:
+        print(f"\nне принято ({len(bad_status)}):")
+        for ident, why in bad_status:
+            print(f"  {ident}: {why}")
+    print()
+    stats(db)
 
 
 def fill(db):
@@ -109,8 +263,16 @@ def stats(db):
 def main():
     db = init_db()
     args = sys.argv[1:]
+    path = EDIT_FILE
+    for a in args:
+        if a.endswith(".txt"):
+            path = Path(a)
     if "--fill" in args:
         fill(db)
+    elif "--export" in args:
+        export(db, path)
+    elif "--import" in args:
+        import_(db, path)
     elif "--approve-all" in args:
         approve_all(db)
     elif "--list" in args:
