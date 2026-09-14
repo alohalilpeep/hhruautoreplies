@@ -44,6 +44,10 @@ DRY_RUN = _flag("DRY_RUN", "True")   # True = только ходит и лог�
 #              откликаемся одним резюме.
 #   always   — прикладывать везде, в том числе дописывать после мгновенного
 #              отклика через «Приложить сопроводительное письмо».
+# Отвечать ли на анкетные вопросы работодателя по шаблонам из answers.txt.
+# Только если распознаны ВСЕ вопросы вакансии, иначе она откладывается.
+AUTO_ANSWER = _flag("AUTO_ANSWER", "False")
+
 LETTER_MODE = os.getenv("LETTER_MODE", "required").strip().lower()
 if LETTER_MODE not in ("never", "required", "always"):
     raise SystemExit(
@@ -251,6 +255,79 @@ SEL = {
     "login_link": '[data-qa="login"]',
 }
 
+# ============ ответы на вопросы работодателей ============
+ANSWERS_FILE = Path(__file__).with_name("answers.txt")
+
+# Темы анкетных вопросов. Правила намеренно узкие: лучше не распознать вопрос
+# и отложить вакансию, чем ответить на него не то. Например «Есть опыт работы
+# с 3proxy?» — технический вопрос, а не «сколько лет опыта», и попадать
+# в тему «опыт» он не должен.
+QUESTION_TOPICS = {
+    "зарплата": re.compile(
+        r"зарплат|заработн\w*\s+плат|оклад|вилк|з/п|\bзп\b"
+        r"|уровн\w+\s+дохода|ожидани\w+\s+по\s+доход", re.I),
+    "город": re.compile(
+        r"в\s+каком\s+городе|город\w*\s+проживани|ваш\s+город"
+        r"|где\s+вы\s+(сейчас\s+)?(живёте|живете|проживаете|находитесь)", re.I),
+    "опыт": re.compile(
+        r"сколько\s+лет|как\s+давно\s+(ты|вы)\b|стаж\s+работы"
+        r"|сколько\s+\w*\s*лет\s+опыта", re.I),
+}
+
+
+# В одно поле часто кладут два вопроса сразу: «В каком городе проживаете?
+# Рассматриваете удалённый формат или гибрид?». Шаблон закроет только половину,
+# поэтому такие пропускаем целиком.
+MAX_QUESTION_LEN = 140
+
+# Признаки того, что рядом с нашей темой спрашивают ещё что-то, чего мы
+# не умеем: «укажите зарплатные ожидания И желаемый формат сотрудничества».
+SECOND_ASK_RE = re.compile(
+    r"формат\w*\s+(сотрудничеств|работ|занятост)|трудов\w+\s+договор|самозанят"
+    r"|\bИП\b|гражданств|готов\w*\s+приступить|когда\s+готов|испытательн"
+    r"|сколько\s+вам\s+лет|ник\s+в\b|телеграм|telegram|гибрид", re.I)
+
+
+def is_compound(text):
+    """Вопрос спрашивает больше одной вещи — шаблонным ответом не закрыть."""
+    flat = re.sub(r"\s+", " ", (text or "").replace("\xa0", " ")).strip()
+    return (flat.count("?") > 1
+            or len(flat) > MAX_QUESTION_LEN
+            or bool(SECOND_ASK_RE.search(flat)))
+
+
+def classify_question(text):
+    """Тема вопроса или None, если шаблонного ответа для него нет."""
+    flat = re.sub(r"\s+", " ", (text or "").replace("\xa0", " "))
+    if is_compound(flat):
+        return None
+    for topic, pat in QUESTION_TOPICS.items():
+        if pat.search(flat):
+            return topic
+    return None
+
+
+def load_answers():
+    """answers.txt: строки вида «тема: ответ». Пустой или отсутствующий файл
+    означает, что автоответы просто не сработают."""
+    answers = {}
+    try:
+        raw = ANSWERS_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return answers
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        topic, _, value = line.partition(":")
+        topic, value = topic.strip().lower(), value.strip()
+        if topic and value:
+            answers[topic] = value
+    return answers
+
+
+ANSWERS = load_answers()
+
 LIMIT_RE = re.compile(r"не более \d+ откликов|лимит откликов", re.I)
 DONE_RE = re.compile(r"Вы откликнулись|Резюме доставлено|Отклик отправлен", re.I)
 # работодатель требует сопроводительное письмо. Формулировка hh в попапе отклика:
@@ -321,9 +398,12 @@ def save(db, vid, url, title, company, status):
 
 
 def applied_today(db):
+    # answered это тоже отправленный отклик, просто с заполненной анкетой
     today = dt.date.today().isoformat()
-    return db.execute("SELECT COUNT(*) FROM responses WHERE status='applied' AND ts >= ?",
-                      (today,)).fetchone()[0]
+    return db.execute(
+        "SELECT COUNT(*) FROM responses "
+        "WHERE status IN ('applied', 'answered') AND ts >= ?",
+        (today,)).fetchone()[0]
 
 
 # ================= hh =================
@@ -393,6 +473,50 @@ def scrape_questions(page):
         return []
 
 
+def answer_questions(page, questions):
+    """Заполнить анкету работодателя и отправить отклик.
+
+    Возвращает None, если отвечать нельзя — тогда вакансия откладывается как
+    раньше. Отказываемся, если: есть нераспознанный вопрос, на тему нет ответа,
+    поле не текстовое (радиокнопку за человека выбирать нельзя) или число полей
+    не сошлось с числом вопросов.
+    """
+    if not AUTO_ANSWER or not ANSWERS or not questions:
+        return None
+
+    plan = []
+    for q in questions:
+        topic = classify_question(q["question"])
+        if not topic or topic not in ANSWERS:
+            return None
+        if "textarea" not in q["kind"] and "text" not in q["kind"]:
+            return None
+        plan.append(ANSWERS[topic])
+
+    bodies = page.locator(SEL["task"])
+    if bodies.count() != len(plan):
+        return None               # разметка не сошлась, не рискуем
+
+    for i, text in enumerate(plan):
+        field = bodies.nth(i).locator("textarea, input[type=text]").first
+        if field.count() == 0:
+            return None
+        field.fill(text)
+        pause(0.5, 1.5)
+
+    submit = page.locator(SEL["popup_submit"])
+    if submit.count() == 0:
+        return None
+    submit.first.click()
+    pause(3, 5)
+
+    if page.get_by_text(LIMIT_RE).count():
+        raise LimitReached()
+    if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
+        return "answered"
+    return "unknown"
+
+
 def close_popup(page):
     """Закрыть попап отклика, ничего не отправляя."""
     btn = page.locator(SEL["popup_close"])
@@ -439,12 +563,15 @@ def apply(page, url, db=None):
     # вакансия с вопросами или тестом, оставляем на ручной разбор.
     # Заодно складываем вопросы в пул: их видно только отсюда.
     if "vacancy_response" in page.url or page.locator(SEL["task"]).count():
-        if db is not None:
-            qs = scrape_questions(page)
-            if qs:
-                m = re.search(r"/vacancy/(\d+)", url)
-                save_questions(db, m.group(1) if m else url, url, company, qs)
-                print(f"    собрано вопросов: {len(qs)}")
+        qs = scrape_questions(page)
+        if db is not None and qs:
+            m = re.search(r"/vacancy/(\d+)", url)
+            save_questions(db, m.group(1) if m else url, url, company, qs)
+            print(f"    собрано вопросов: {len(qs)}")
+        answered = answer_questions(page, qs)
+        if answered:
+            print(f"    анкета заполнена, вопросов: {len(qs)}")
+            return answered, title, company
         return "questions", title, company
 
     # в базу пишем сырой заголовок, в письмо — очищенный
