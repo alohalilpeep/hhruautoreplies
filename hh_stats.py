@@ -9,6 +9,8 @@
     venv/bin/python hh_stats.py --snapshot "правка 2.0" слепок с заметкой
     venv/bin/python hh_stats.py                         отчёт
     venv/bin/python hh_stats.py --daily                 отклики по дням
+    venv/bin/python hh_stats.py --collect               снять статусы с hh и разложить по когортам
+    venv/bin/python hh_stats.py --cohorts               отчёт по когортам
 
 Про даты честно: в списке hh дата — это дата ОТКЛИКА, а не дата отказа.
 Поэтому «сколько отказов пришло во вторник» ретроспективно не построить,
@@ -35,6 +37,18 @@ TABS = {
     "tab_filter_awaiting": "awaiting",
     "tab_filter_discard": "discard",
 }
+
+
+def already_open():
+    """Профиль уже открыт? Тогда его нельзя закрывать в конце: скорее всего
+    им в этот момент пользуется человек или другой прогон."""
+    import requests
+    try:
+        r = requests.post(f"{hh.BIT_API}/browser/ports", json={},
+                          headers=hh._headers(), timeout=10).json()
+        return hh.PROFILE_ID in (r.get("data") or {})
+    except Exception:
+        return False
 
 
 def ensure_table(db):
@@ -66,6 +80,7 @@ def read_counters(page):
 def snapshot(note=""):
     db = init_db()
     ensure_table(db)
+    was_open = already_open()
     ws = hh.open_profile()
     try:
         with sync_playwright() as p:
@@ -78,7 +93,8 @@ def snapshot(note=""):
             counts = read_counters(page)
             page.close()
     finally:
-        hh.close_profile()
+        if not was_open:
+            hh.close_profile()
 
     own = db.execute(
         "SELECT COUNT(*) FROM responses WHERE status IN ('applied','answered')"
@@ -194,11 +210,145 @@ def main():
     if "--snapshot" in args:
         i = args.index("--snapshot")
         snapshot(" ".join(args[i + 1:]).strip())
+    elif "--collect" in args:
+        collect()
+    elif "--cohorts" in args:
+        cohorts()
     elif "--daily" in args:
         daily()
     else:
         report()
 
+
+
+# ============ когортный подсчёт ============
+# Статус каждого отклика с hh привязывается к версии резюме, под которой он
+# ушёл. Точного id вакансии в списке откликов нет — заголовок там простой span,
+# ссылка только на работодателя. Поэтому сопоставляем по паре
+# «компания + название вакансии». Дубли помечаются отдельно и не считаются.
+STATUS_MAP = {
+    "отказ": "discard",
+    "приглашение": "invitation",
+    "собеседование": "interview",
+    "выход на работу": "hired",
+    "не просмотрен": "not_viewed",
+    "просмотрен": "viewed",
+}
+
+
+def _key(company, title):
+    def norm(x):
+        x = (x or "").lower().replace("ё", "е")
+        x = re.sub(r"[^\w\s]", " ", x)
+        return re.sub(r"\s+", " ", x).strip()
+    return norm(company), norm(title)
+
+
+def collect_negotiations(page, max_pages=25):
+    """Все записи из списка откликов, со статусом и датой."""
+    items, seen_pages = [], 0
+    for n in range(max_pages):
+        page.goto(f"{NEGOTIATIONS}?page={n}", wait_until="commit")
+        page.wait_for_timeout(5000)
+        chunk = page.evaluate("""() => [...document.querySelectorAll('[data-qa="negotiations-item"]')]
+            .map(el => {
+                const q = s => { const x = el.querySelector(s); return x ? (x.innerText||'').trim() : ''; };
+                const tag = [...el.querySelectorAll('[data-qa^="negotiations-tag"]')]
+                            .map(e => (e.innerText||'').trim()).filter(Boolean)[0] || '';
+                return {tag, company: q('[data-qa="negotiations-item-company"]'),
+                        title: q('[data-qa="negotiations-item-vacancy"]'),
+                        date: q('[data-qa="negotiations-item-date"]')};
+            })""")
+        if not chunk:
+            break
+        items.extend(chunk)
+        seen_pages += 1
+    print(f"страниц откликов прочитано: {seen_pages}, записей: {len(items)}")
+    return items
+
+
+def match_and_store(db, items):
+    """Разложить статусы hh по нашим откликам."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(responses)")}
+    if "hh_status" not in cols:
+        db.execute("ALTER TABLE responses ADD COLUMN hh_status TEXT")
+        db.execute("ALTER TABLE responses ADD COLUMN hh_status_ts TEXT")
+
+    ours = {}
+    for rid, company, title in db.execute(
+            "SELECT id, company, title FROM responses "
+            "WHERE status IN ('applied','answered')"):
+        ours.setdefault(_key(company, title), []).append(rid)
+
+    ts = dt.datetime.now().isoformat(timespec="seconds")
+    matched, ambiguous, unmatched = 0, 0, 0
+    for it in items:
+        # hh ставит в тегах неразрывный пробел: «Не\xa0просмотрен»
+        tag = re.sub(r"\s+", " ", (it["tag"] or "").replace("\xa0", " ")).strip()
+        st = STATUS_MAP.get(tag.lower())
+        if not st:
+            continue
+        ids = ours.get(_key(it["company"], it["title"]))
+        if not ids:
+            unmatched += 1
+            continue
+        if len(ids) > 1:
+            ambiguous += 1          # один и тот же заголовок откликнут дважды
+            continue
+        db.execute("UPDATE responses SET hh_status=?, hh_status_ts=? WHERE id=?",
+                   (st, ts, ids[0]))
+        matched += 1
+    db.commit()
+    print(f"сопоставлено: {matched}, неоднозначных (дубли): {ambiguous}, "
+          f"не наших: {unmatched}")
+
+
+def cohorts(db=None):
+    db = db or init_db()
+    cols = {r[1] for r in db.execute("PRAGMA table_info(responses)")}
+    if "hh_status" not in cols:
+        print("данных нет: сначала venv/bin/python hh_stats.py --collect")
+        return
+    ORDER = ["hired", "invitation", "interview", "discard", "viewed",
+             "not_viewed", None]
+    NAMES = {"hired": "выход на работу", "invitation": "приглашение",
+             "interview": "собеседование", "discard": "отказ",
+             "viewed": "просмотрен", "not_viewed": "не просмотрен",
+             None: "нет данных"}
+    print("\n=== когорты по версиям резюме ===")
+    for (ver,) in db.execute(
+            "SELECT DISTINCT resume_version FROM responses "
+            "WHERE status IN ('applied','answered') ORDER BY resume_version"):
+        rows = dict(db.execute(
+            "SELECT hh_status, COUNT(*) FROM responses "
+            "WHERE status IN ('applied','answered') AND resume_version=? "
+            "GROUP BY hh_status", (ver,)).fetchall())
+        total = sum(rows.values())
+        print(f"\n  резюме {ver} — {total} откликов")
+        for st in ORDER:
+            n = rows.get(st, 0)
+            if not n:
+                continue
+            print(f"    {NAMES[st]:16s} {n:4d}  {n / total * 100:5.1f}%")
+
+
+def collect():
+    db = init_db()
+    was_open = already_open()
+    ws = hh.open_profile()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.connect_over_cdp(ws)
+            ctx = browser.contexts[0]
+            page = ctx.new_page()
+            page.set_default_navigation_timeout(90000)
+            items = collect_negotiations(page)
+            page.close()
+    finally:
+        if not was_open:
+            hh.close_profile()
+    match_and_store(db, items)
+    cohorts(db)
 
 if __name__ == "__main__":
     main()
