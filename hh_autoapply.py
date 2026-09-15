@@ -798,6 +798,14 @@ def main():
                     print("hh пишет, что лимит откликов исчерпан")
                     break
                 except Exception as e:
+                    # Профиль BitBrowser закрылся — чаще всего мак ушёл в сон.
+                    # Продолжать бессмысленно: каждая следующая вакансия просто
+                    # запишет ошибку. Останавливаемся, вакансии не потеряны.
+                    if "has been closed" in str(e) or "Target closed" in str(e):
+                        print(f"\nБраузер закрылся (сон или закрытое окно). "
+                              f"Останавливаюсь, чтобы не гнать вхолостую.\n"
+                              f"Запусти снова: caffeinate -i venv/bin/python hh_autoapply.py")
+                        break
                     status, title, company = "error", "", ""
                     print(f"Ошибка на {url}: {e}")
 
