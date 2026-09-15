@@ -145,6 +145,20 @@ def report(db=None):
         print(f"    собеседований:      {intr:3d}  ({intr / sent * 100:.0f}%)")
         print(f"    приглашений:        {invt:3d}  ({invt / sent * 100:.0f}%)")
 
+    print("\n=== сопроводительное письмо ===")
+    rows = db.execute("""
+        SELECT resume_version,
+               SUM(CASE WHEN letter_sent=1 THEN 1 ELSE 0 END),
+               SUM(CASE WHEN letter_sent=0 THEN 1 ELSE 0 END),
+               SUM(CASE WHEN letter_sent IS NULL THEN 1 ELSE 0 END)
+        FROM responses WHERE status IN ('applied','answered')
+        GROUP BY resume_version ORDER BY resume_version""").fetchall()
+    for ver, with_l, without_l, unknown in rows:
+        print(f"  версия {ver or '?'}: с письмом {with_l}, без письма {without_l}"
+              + (f", неизвестно {unknown}" if unknown else ""))
+    if any(r[3] for r in rows):
+        print("  «неизвестно» — отклики до того, как признак начали писать")
+
     print("\nтекущая версия резюме в .env:", hh.RESUME_VERSION)
 
 

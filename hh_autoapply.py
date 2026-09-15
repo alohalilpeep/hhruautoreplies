@@ -443,6 +443,8 @@ def init_db():
     cols = {r[1] for r in db.execute("PRAGMA table_info(responses)")}
     if "resume_version" not in cols:
         db.execute("ALTER TABLE responses ADD COLUMN resume_version TEXT")
+    if "letter_sent" not in cols:
+        db.execute("ALTER TABLE responses ADD COLUMN letter_sent INTEGER")
     # пул вопросов работодателей: копится сам, пока скрипт откладывает questions
     db.execute("""CREATE TABLE IF NOT EXISTS questions (
         vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
@@ -477,13 +479,14 @@ def save_questions(db, vid, url, company, questions):
     db.commit()
 
 
-def save(db, vid, url, title, company, status):
+def save(db, vid, url, title, company, status, letter_sent=False):
     db.execute(
         "INSERT OR REPLACE INTO responses "
-        "(id, url, title, company, status, ts, resume_version) "
-        "VALUES (?,?,?,?,?,?,?)",
+        "(id, url, title, company, status, ts, resume_version, letter_sent) "
+        "VALUES (?,?,?,?,?,?,?,?)",
         (vid, url, title, company, status,
-         dt.datetime.now().isoformat(timespec="seconds"), RESUME_VERSION))
+         dt.datetime.now().isoformat(timespec="seconds"), RESUME_VERSION,
+         1 if letter_sent else 0))
     db.commit()
 
 
@@ -626,7 +629,14 @@ def close_popup(page):
     pause(1, 2)
 
 
+# Письмо, приложенное к последнему отклику. Скрипт однопоточный, поэтому
+# флаг модуля надёжнее, чем тащить четвёртый элемент через все ветки возврата.
+LAST_LETTER_SENT = False
+
+
 def apply(page, url, db=None):
+    global LAST_LETTER_SENT
+    LAST_LETTER_SENT = False
     page.goto(url, wait_until="domcontentloaded")
     pause(2, 4)
     title = text_or(page, SEL["title"])
@@ -742,7 +752,9 @@ def apply(page, url, db=None):
                 letter_sent = True
 
     if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
+        LAST_LETTER_SENT = letter_sent
         return "applied", title, company
+    LAST_LETTER_SENT = letter_sent
     return "unknown", title, company
 
 
@@ -789,9 +801,20 @@ def main():
                     status, title, company = "error", "", ""
                     print(f"Ошибка на {url}: {e}")
 
-                save(db, vid, url, title, company, status)
-                print(f"[{status}] {title} | {company} | {url}")
+                save(db, vid, url, title, company, status, LAST_LETTER_SENT)
+                mark = " +письмо" if LAST_LETTER_SENT else ""
+                print(f"[{status}{mark}] {title} | {company} | {url}")
                 pause(20, 60) if status == "applied" else pause(3, 8)
+
+            today = dt.date.today().isoformat()
+            with_letter = db.execute(
+                "SELECT COUNT(*) FROM responses WHERE letter_sent=1 "
+                "AND status IN ('applied','answered') AND ts >= ?",
+                (today,)).fetchone()[0]
+            total_today = applied_today(db)
+            print(f"\nЗа сегодня откликов: {total_today}, "
+                  f"из них с сопроводительным: {with_letter}, "
+                  f"без письма: {total_today - with_letter}")
     finally:
         close_profile()
 
