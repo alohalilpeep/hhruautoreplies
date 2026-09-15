@@ -35,6 +35,9 @@ SEARCH_URL = os.getenv("SEARCH_URL", "")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))          # сколько страниц выдачи обходить
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит откликов в сутки
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
+# Версия резюме. Штампуется на каждый отклик, чтобы потом сравнивать
+# конверсию разных редакций: поменял резюме — подними версию в .env.
+RESUME_VERSION = os.getenv("RESUME_VERSION", "1.0").strip() or "1.0"
 DRY_RUN = _flag("DRY_RUN", "True")   # True = только ходит и логирует, не откликается
 
 # Что делать с сопроводительным письмом:
@@ -436,6 +439,10 @@ def init_db():
     db = sqlite3.connect("hh_responses.db")
     db.execute("""CREATE TABLE IF NOT EXISTS responses (
         id TEXT PRIMARY KEY, url TEXT, title TEXT, company TEXT, status TEXT, ts TEXT)""")
+    # версия резюме на момент отклика; в старых базах колонки нет
+    cols = {r[1] for r in db.execute("PRAGMA table_info(responses)")}
+    if "resume_version" not in cols:
+        db.execute("ALTER TABLE responses ADD COLUMN resume_version TEXT")
     # пул вопросов работодателей: копится сам, пока скрипт откладывает questions
     db.execute("""CREATE TABLE IF NOT EXISTS questions (
         vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
@@ -471,8 +478,12 @@ def save_questions(db, vid, url, company, questions):
 
 
 def save(db, vid, url, title, company, status):
-    db.execute("INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?,?)",
-               (vid, url, title, company, status, dt.datetime.now().isoformat(timespec="seconds")))
+    db.execute(
+        "INSERT OR REPLACE INTO responses "
+        "(id, url, title, company, status, ts, resume_version) "
+        "VALUES (?,?,?,?,?,?,?)",
+        (vid, url, title, company, status,
+         dt.datetime.now().isoformat(timespec="seconds"), RESUME_VERSION))
     db.commit()
 
 

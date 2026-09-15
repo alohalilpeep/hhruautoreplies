@@ -8,6 +8,11 @@ chat_questions и chat_answers. В анкете вакансии свободн�
     venv/bin/python hh_chats.py --scan        обойти чаты и собрать вопросы
     venv/bin/python hh_chats.py --scan 5      только первые 5 чатов
     venv/bin/python hh_chats.py --list        показать собранное
+    venv/bin/python hh_chats.py --fill        завести ответы под новые вопросы
+    venv/bin/python hh_chats.py --export      выгрузить в chat_answers_edit.txt
+    venv/bin/python hh_chats.py --import      вернуть правки в базу
+    venv/bin/python hh_chats.py --reply       СУХОЙ прогон: что бы отправил
+    venv/bin/python hh_chats.py --reply --send БОЕВОЙ: реально отправляет
     venv/bin/python hh_chats.py               сводка
 
 ВАЖНО: чтобы прочитать вопросы, чат приходится открыть, а открытие снимает
@@ -19,6 +24,7 @@ chat_questions и chat_answers. В анкете вакансии свободн�
 import datetime as dt
 import re
 import sys
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -222,7 +228,17 @@ def stats(db=None):
 
 def main():
     args = sys.argv[1:]
-    if "--scan" in args:
+    if "--fill" in args:
+        fill_answers(init_db())
+    elif "--export" in args:
+        export_answers(init_db())
+    elif "--import" in args:
+        import_answers(init_db())
+    elif "--reply" in args:
+        i = args.index("--reply")
+        lim = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
+        reply(lim, dry="--send" not in args)
+    elif "--scan" in args:
         i = args.index("--scan")
         limit = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
         scan(limit)
@@ -231,6 +247,260 @@ def main():
     else:
         stats()
 
+
+
+# ============ банк ответов для чатов ============
+# Отдельный от анкет вакансий: там свободная форма, здесь диалог.
+from hh_answers import qid, _parse_status, SEP  # noqa: E402
+
+EDIT_FILE = Path(__file__).with_name("chat_answers_edit.txt")
+
+CHAT_HEADER = """\
+# Ответы на вопросы из чатов с работодателями. Экспорт из hh_responses.db.
+#
+# Правь ТОЛЬКО текст после «ОТВЕТ:» и, если нужно, строку «СТАТУС:».
+# Строку «ID:» не трогай. Блоки разделены строкой из трёх дефисов.
+#
+# КНОПКИ — то, что hh показывает внизу чата. У робота-рекрутера это варианты
+# ответа, у ИИ-помощника и живого HR — заготовки вопросов К работодателю.
+# Если ответ точно совпадает с текстом кнопки, скрипт нажмёт её,
+# иначе напечатает текст в поле сообщения.
+#
+# СТАТУС: approved — отправится | draft — нет | needs_input — нужен твой ответ
+# УДАЛИТЬ БЛОК = не отвечать на такой вопрос никогда (статус skip).
+#
+# Вернуть в базу:  venv/bin/python hh_chats.py --import
+"""
+
+
+def fill_answers(db):
+    seen = {q for (q,) in db.execute("SELECT qnorm FROM chat_answers")}
+    added = 0
+    for question, buttons in db.execute(
+            "SELECT question, buttons FROM chat_questions"):
+        qn = normalize_question(question)
+        if not qn or qn in seen:
+            continue
+        seen.add(qn)
+        db.execute("INSERT INTO chat_answers VALUES (?,?,?,?,?,?)",
+                   (qn, question.strip(), buttons or "", "", "draft",
+                    dt.datetime.now().isoformat(timespec="seconds")))
+        added += 1
+    db.commit()
+    print(f"заведено новых вопросов: {added}, всего в банке чатов: {len(seen)}")
+
+
+def export_answers(db, path=EDIT_FILE):
+    who = {}
+    for author, question in db.execute(
+            "SELECT author, question FROM chat_questions"):
+        who.setdefault(normalize_question(question), set()).add(author or "—")
+    comp = {}
+    for company, question in db.execute(
+            "SELECT company, question FROM chat_questions"):
+        comp.setdefault(normalize_question(question), set()).add(company or "—")
+
+    rows = db.execute(
+        "SELECT qnorm, question, options, answer, status FROM chat_answers"
+    ).fetchall()
+    order = {"needs_input": 0, "draft": 1, "approved": 2, "skip": 3}
+    rows.sort(key=lambda r: (order.get(r[4], 4), r[1]))
+
+    ids = [qid(r[0]) for r in rows]
+    exported = "\n".join("# EXPORTED: " + " ".join(ids[i:i + 8])
+                         for i in range(0, len(ids), 8))
+    chunks = [CHAT_HEADER + exported + "\n"]
+    for qnorm, question, options, answer, status in rows:
+        flat = re.sub(r"\s+", " ", question or "").strip()
+        chunks.append(
+            f"{SEP}\n"
+            f"ID: {qid(qnorm)}\n"
+            f"СТАТУС: {status}\n"
+            f"КОМПАНИЯ: {', '.join(sorted(comp.get(qnorm, []))) or '—'}\n"
+            f"СПРАШИВАЕТ: {', '.join(sorted(who.get(qnorm, []))) or '—'}\n"
+            f"ВОПРОС: {textwrap.fill(flat, 96, subsequent_indent='        ')}\n"
+            f"КНОПКИ: {options or '—'}\n"
+            f"ОТВЕТ:\n{(answer or '').strip()}\n")
+    chunks.append(SEP + "\n")
+    path.write_text("\n".join(chunks), encoding="utf-8")
+    print(f"выгружено {len(rows)} вопросов в {path.name}")
+
+
+def import_answers(db, path=EDIT_FILE):
+    if not path.exists():
+        raise SystemExit(f"нет файла {path.name} — сначала --export")
+    by_id = {qid(q): q for (q,) in db.execute("SELECT qnorm FROM chat_answers")}
+    text = path.read_text(encoding="utf-8")
+
+    exported = set()
+    for line in text.splitlines():
+        if line.startswith("# EXPORTED:"):
+            exported.update(line.split(":", 1)[1].split())
+
+    present, updated, bad = set(), 0, []
+    for block in re.split(rf"^{SEP}\s*$", text, flags=re.M):
+        fields, ans, in_ans = {}, [], False
+        for line in block.splitlines():
+            if in_ans:
+                ans.append(line)
+                continue
+            if line.strip() == "ОТВЕТ:":
+                in_ans = True
+                continue
+            m = re.match(r"^(ID|СТАТУС):\s*(.*)$", line)
+            if m:
+                fields[m.group(1)] = m.group(2)
+        ident = fields.get("ID", "").strip()
+        if not ident:
+            continue
+        present.add(ident)
+        qnorm = by_id.get(ident)
+        if not qnorm:
+            continue
+        status = _parse_status(fields.get("СТАТУС"))
+        answer = "\n".join(ans).strip()
+        if fields.get("СТАТУС") and status is None:
+            bad.append((ident, fields["СТАТУС"].strip()))
+            continue
+        if status == "approved" and not answer:
+            bad.append((ident, "approved с пустым ответом"))
+            continue
+        db.execute("UPDATE chat_answers SET answer=?, status=?, ts=? WHERE qnorm=?",
+                   (answer, status or "draft",
+                    dt.datetime.now().isoformat(timespec="seconds"), qnorm))
+        updated += 1
+
+    deleted = [by_id[i] for i in sorted(exported - present) if i in by_id]
+    for qnorm in deleted:
+        db.execute("UPDATE chat_answers SET status='skip' WHERE qnorm=?", (qnorm,))
+    db.commit()
+    print(f"обновлено: {updated}")
+    if deleted:
+        print(f"удалено из файла → не отвечаем ({len(deleted)})")
+    for ident, why in bad:
+        print(f"  не принято {ident}: {why}")
+
+
+def load_chat_bank(db):
+    return {q: a for q, a in db.execute(
+        "SELECT qnorm, answer FROM chat_answers "
+        "WHERE status='approved' AND TRIM(COALESCE(answer,'')) != ''")}
+
+
+# ============ отвечающий цикл ============
+MAX_TURNS = 6          # сколько реплик подряд отвечаем в одном чате
+INPUT_SEL = '[data-qa="text-input"]'
+
+
+def chat_state(page):
+    """Сообщения с пометкой, чьи они. Свои узнаём по индикатору прочтения."""
+    return page.evaluate("""() => {
+        const out = [];
+        let author = '';
+        for (const el of document.querySelectorAll('[data-qa^="chatik-chat-message-"]')) {
+            const qa = el.getAttribute('data-qa') || '';
+            if (qa.endsWith('-text')) continue;
+            const a = el.querySelector('[data-qa="chat-bubble-author-name"]');
+            if (a && a.innerText.trim()) author = a.innerText.trim();
+            const t = el.querySelector('[data-qa="chat-bubble-text"]');
+            const text = (t ? t.innerText : el.innerText || '').trim();
+            if (!text) continue;
+            out.push({
+                id: qa.replace('chatik-chat-message-',''),
+                author,
+                own: !!el.querySelector('[data-qa="chat-bubble-indicators"]'),
+                text,
+            });
+        }
+        return out;
+    }""")
+
+
+def pending_question(msgs):
+    """Последний вопрос собеседника, на который мы ещё не ответили."""
+    for m in reversed(msgs):
+        if m["own"]:
+            return None          # последнее слово наше — отвечать нечего
+        if is_question(m["text"]) and m["author"] not in SKIP_AUTHORS:
+            return m
+    return None
+
+
+def send_reply(page, text, dry):
+    """Нажать кнопку с таким текстом или напечатать ответ и отправить."""
+    exact = [b for b in page.evaluate(
+        """() => [...document.querySelectorAll('button')]
+             .filter(b => !b.getAttribute('data-qa'))
+             .map(b => (b.textContent||'').trim())""")
+        if b and b.strip().lower() == text.strip().lower()]
+    if exact:
+        if dry:
+            print(f"      [сухой] нажал бы кнопку {text!r}")
+            return True
+        page.get_by_role("button", name=text, exact=True).first.click()
+        return True
+
+    field = page.locator(INPUT_SEL)
+    if field.count() == 0 or not field.first.is_visible():
+        print("      поля ввода нет, пропускаю")
+        return False
+    if dry:
+        print(f"      [сухой] напечатал бы: {text[:110]!r}")
+        return True
+    field.first.click()
+    field.first.fill(text)
+    hh.pause(1, 2)
+    page.keyboard.press("Enter")
+    return True
+
+
+def reply(limit=None, dry=True):
+    db = init_db()
+    bank = load_chat_bank(db)
+    print(f"одобренных ответов в банке: {len(bank)}"
+          + ("  [СУХОЙ ПРОГОН]" if dry else "  [БОЕВОЙ РЕЖИМ]"))
+    if not bank:
+        raise SystemExit("банк пуст: заполни chat_answers и одобри ответы")
+
+    ws = hh.open_profile()
+    sent = 0
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(ws)
+        ctx = browser.contexts[0]
+        page = ctx.new_page()
+        page.set_default_navigation_timeout(90000)
+        try:
+            chats = list_chats(page)
+            if limit:
+                chats = chats[:limit]
+            print(f"чатов к обходу: {len(chats)}\n")
+            for c in chats:
+                page.goto(f"https://hh.ru/chat/{c['id']}", wait_until="commit")
+                page.wait_for_timeout(5000)
+                for turn in range(MAX_TURNS):
+                    q = pending_question(chat_state(page))
+                    if not q:
+                        break
+                    answer = bank.get(normalize_question(q["text"]))
+                    if not answer:
+                        if turn == 0:
+                            print(f"  [{c['company'][:26]}] нет одобренного ответа: "
+                                  f"{re.sub(r'  +', ' ', q['text'])[:80]}")
+                        break
+                    print(f"  [{c['company'][:26]}] отвечаю на: "
+                          f"{re.sub(r'  +', ' ', q['text'])[:70]}")
+                    if not send_reply(page, answer, dry):
+                        break
+                    sent += 1
+                    if dry:
+                        break          # в сухом режиме диалог не двигается
+                    hh.pause(4, 8)
+                    page.wait_for_timeout(3000)
+                hh.pause(2, 4)
+        finally:
+            page.close()
+            hh.close_profile()
+    print(f"\n{'было бы отправлено' if dry else 'отправлено'}: {sent}")
 
 if __name__ == "__main__":
     main()
