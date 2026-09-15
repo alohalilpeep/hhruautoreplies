@@ -441,6 +441,16 @@ def init_db():
         vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
         question TEXT, kind TEXT, options TEXT, ts TEXT,
         PRIMARY KEY (vacancy_id, idx))""")
+    # Вопросы робота-рекрутера из чатов hh. Отдельно от questions: там анкета
+    # вакансии со свободным вводом, здесь диалог с готовыми вариантами ответа.
+    db.execute("""CREATE TABLE IF NOT EXISTS chat_questions (
+        chat_id TEXT, msg_id TEXT, company TEXT, vacancy TEXT,
+        question TEXT, options TEXT, ts TEXT,
+        PRIMARY KEY (chat_id, msg_id))""")
+    # банк ответов для чатов, тоже отдельный
+    db.execute("""CREATE TABLE IF NOT EXISTS chat_answers (
+        qnorm TEXT PRIMARY KEY, question TEXT, options TEXT,
+        answer TEXT, status TEXT, ts TEXT)""")
     # банк готовых ответов: заполняется вручную через hh_answers.py.
     # Ключ — нормализованный текст вопроса, поэтому повторы переиспользуются.
     db.execute("""CREATE TABLE IF NOT EXISTS answer_bank (
