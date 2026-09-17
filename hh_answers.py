@@ -18,6 +18,8 @@
     venv/bin/python hh_answers.py --list        показать банк
     venv/bin/python hh_answers.py --list draft  только неготовые
     venv/bin/python hh_answers.py --approve-all пометить готовыми черновики
+    venv/bin/python hh_answers.py --block "X"   заблокировать компанию
+    venv/bin/python hh_answers.py --purge "X"   заблокировать и вычистить её вопросы
     venv/bin/python hh_answers.py               сводка
 
 Обычный цикл: --fill → --export → правишь txt → --import
@@ -321,9 +323,46 @@ def block_company(name):
     print(f"{name!r} добавлена в {BLACKLIST_FILE.name}")
 
 
+def purge_company(db, name):
+    """Заблокировать компанию и вычистить её вопросы из базы.
+
+    Вопросы, которые задаёт кто-то ещё, не трогаем: ответ на них может быть
+    нужен для другой вакансии.
+    """
+    name = name.strip()
+    if not name:
+        raise SystemExit('укажи название: --purge "Название компании"')
+    block_company(name)
+
+    like = f"%{name}%"
+    theirs = {normalize_question(q) for (q,) in db.execute(
+        "SELECT question FROM questions WHERE company LIKE ?", (like,))}
+    shared = {normalize_question(q) for (q,) in db.execute(
+        "SELECT question FROM questions WHERE company NOT LIKE ?", (like,))}
+    only = theirs - shared
+
+    nq = db.execute("DELETE FROM questions WHERE company LIKE ?", (like,)).rowcount
+    nb = sum(db.execute("DELETE FROM answer_bank WHERE qnorm=?", (q,)).rowcount
+             for q in only)
+    try:
+        nc = db.execute("DELETE FROM chat_questions WHERE company LIKE ?",
+                        (like,)).rowcount
+    except sqlite3.OperationalError:
+        nc = 0
+    db.commit()
+    print(f"удалено вопросов: {nq}, ответов из банка: {nb}, реплик из чатов: {nc}")
+    if theirs - only:
+        print(f"оставлено общих с другими компаниями: {len(theirs - only)}")
+    print("\nне забудь перевыгрузить файл: hh_answers.py --export")
+
+
 def main():
     db = init_db()
     args = sys.argv[1:]
+    if "--purge" in args:
+        i = args.index("--purge")
+        purge_company(db, " ".join(args[i + 1:]))
+        return
     if "--block" in args:
         i = args.index("--block")
         block_company(" ".join(args[i + 1:]))

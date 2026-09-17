@@ -751,10 +751,14 @@ def apply(page, url, db=None):
                 pause(2, 3)
                 letter_sent = True
 
-    if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
-        LAST_LETTER_SENT = letter_sent
-        return "applied", title, company
+    # hh обновляет страницу после отклика не мгновенно: первая проверка иногда
+    # успевает раньше и даёт ложный unknown. Пробуем несколько раз.
     LAST_LETTER_SENT = letter_sent
+    for attempt in range(4):
+        if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
+            return "applied", title, company
+        if attempt < 3:
+            page.wait_for_timeout(2500)
     return "unknown", title, company
 
 
