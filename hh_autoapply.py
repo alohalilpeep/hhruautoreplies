@@ -375,6 +375,27 @@ def load_answer_bank(db):
     return {q: a for q, a in rows if a and a.strip()}
 
 
+def load_choice_bank(db):
+    """Одобренные варианты ответа. Значение — список подписей вариантов.
+
+    Заполняется через hh_choices.py. Никаких шаблонов по темам здесь нет:
+    вариант либо одобрен человеком, либо вакансия откладывается.
+    """
+    if db is None:
+        return {}
+    try:
+        rows = db.execute("SELECT qnorm, choice FROM answer_bank "
+                          "WHERE choice_status='approved'")
+    except sqlite3.OperationalError:
+        return {}
+    out = {}
+    for qnorm, choice in rows:
+        picks = [c.strip() for c in (choice or "").split("|") if c.strip()]
+        if picks:
+            out[qnorm] = picks
+    return out
+
+
 def classify_question(text):
     """Тема вопроса или None, если шаблонного ответа для него нет."""
     flat = re.sub(r"\s+", " ", (text or "").replace("\xa0", " "))
@@ -618,7 +639,8 @@ def scrape_questions(page):
                             if (l) t = (l.innerText || '').trim();
                         }
                         return {label: t, value: i.value || '',
-                                name: i.name || '', checked: !!i.checked};
+                                name: i.name || '', id: i.id || '',
+                                checked: !!i.checked};
                     })
                     .filter(o => o.label);
                 return {
@@ -633,48 +655,130 @@ def scrape_questions(page):
         return []
 
 
-def answer_questions(page, questions, bank=None, letter=""):
+# «Свой вариант» раскрывает скрытое поле для произвольного текста —
+# автоматически его не выбираем никогда
+OPEN_VALUE = "open"
+
+
+def pick_option(page, opt):
+    """Отметить вариант ответа. Возвращает True, если он реально отмечен.
+
+    hh рисует свои чекбоксы поверх настоящего input, поэтому сначала пробуем
+    сам input, а если он перекрыт — жмём его подпись.
+    """
+    inp = page.locator(
+        f'input[name="{opt["name"]}"][value="{opt["value"]}"]').first
+    if inp.count() == 0:
+        return False
+    try:
+        if inp.is_checked():
+            return True
+    except Exception:
+        return False
+    try:
+        inp.check(timeout=5000)
+    except Exception:
+        oid = opt.get("id") or inp.get_attribute("id")
+        if not oid:
+            return False
+        lab = page.locator(f'label[for="{oid}"]').first
+        if lab.count() == 0:
+            return False
+        try:
+            lab.click(timeout=5000)
+        except Exception:
+            return False
+    pause(0.3, 0.9)
+    try:
+        return inp.is_checked()
+    except Exception:
+        return False
+
+
+def plan_choice(q, picks):
+    """Сопоставить одобренные подписи с вариантами на странице.
+
+    Возвращает список вариантов к отметке или None, если что-то не сошлось:
+    подписи нет среди вариантов, на радиокнопке одобрено больше одного,
+    или выбран «свой вариант» со скрытым полем.
+    """
+    avail = {c["label"]: c for c in (q.get("choices") or [])}
+    if not avail:
+        return None
+    chosen = []
+    for label in picks:
+        opt = avail.get(label)
+        if opt is None or opt.get("value") == OPEN_VALUE:
+            return None
+        chosen.append(opt)
+    single = "radio" in q["kind"] and "checkbox" not in q["kind"]
+    if single and len(chosen) != 1:
+        return None
+    return chosen
+
+
+def answer_questions(page, questions, bank=None, letter="", choices=None):
     """Заполнить анкету работодателя и отправить отклик.
 
     Источники ответа, в порядке приоритета:
       1. банк одобренных ответов из базы (точный вопрос),
       2. шаблон по теме из answers.txt (зарплата, город и т.п.).
 
+    Вопросы с выбором варианта отвечаются только из банка одобренных выборов:
+    шаблонов по темам для них нет, угадывать за человека нечего.
+
     Возвращает None, если отвечать нельзя — тогда вакансия откладывается как
     раньше. Отказываемся, если: на вопрос нет ни одобренного ответа, ни темы;
-    поле не текстовое (радиокнопку за человека выбирать нельзя); или число полей
-    не сошлось с числом вопросов.
+    вариант не одобрен или не нашёлся на странице; или число полей не сошлось
+    с числом вопросов. Отвечаем либо на всю анкету, либо ни на что.
     """
     global LAST_LETTER_SENT
     if not AUTO_ANSWER or not questions:
         return None
     bank = bank or {}
+    choices = choices or {}
 
     plan = []
     for q in questions:
+        qnorm = normalize_question(q["question"])
+        # вопрос с вариантами: только одобренный выбор, шаблоны не применимы
+        if "radio" in q["kind"] or "checkbox" in q["kind"]:
+            picks = choices.get(qnorm)
+            if not picks:
+                return None
+            chosen = plan_choice(q, picks)
+            if chosen is None:
+                return None
+            plan.append(("choice", chosen))
+            continue
         if "textarea" not in q["kind"] and "text" not in q["kind"]:
             return None
-        approved = bank.get(normalize_question(q["question"]))
+        approved = bank.get(qnorm)
         if approved:
-            plan.append(approved)
+            plan.append(("text", approved))
             continue
         topic = classify_question(q["question"])
         if not topic or topic not in ANSWERS:
             return None
-        plan.append(ANSWERS[topic])
+        plan.append(("text", ANSWERS[topic]))
 
     bodies = page.locator(SEL["task"])
     if bodies.count() != len(plan):
         return None               # разметка не сошлась, не рискуем
 
-    for i, text in enumerate(plan):
+    for i, (action, payload) in enumerate(plan):
+        if action == "choice":
+            for opt in payload:
+                if not pick_option(page, opt):
+                    return None   # вариант не отметился, анкету не отправляем
+            continue
         field = bodies.nth(i).locator("textarea, input[type=text]").first
         # В смешанных анкетах поле «уточните» лежит в разметке скрытым и
         # раскрывается только после выбора варианта. Заполнять его нельзя:
         # fill() ждёт видимости 30 секунд и валит прогон в error.
         if field.count() == 0 or not field.is_visible():
             return None
-        field.fill(text)
+        field.fill(payload)
         pause(0.5, 1.5)
 
     # На части вакансий рядом с анкетой висит обязательное сопроводительное
@@ -786,7 +890,8 @@ def apply(page, url, db=None):
                            for q in qs):
             return "skipped_question", title, company
 
-        answered = answer_questions(page, qs, load_answer_bank(db), letter)
+        answered = answer_questions(page, qs, load_answer_bank(db), letter,
+                                    load_choice_bank(db))
         if answered == "needs_letter":
             return "needs_letter", title, company
         if answered:
