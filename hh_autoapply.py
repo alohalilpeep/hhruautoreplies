@@ -499,6 +499,21 @@ def init_db():
     db.execute("""CREATE TABLE IF NOT EXISTS answer_bank (
         qnorm TEXT PRIMARY KEY, question TEXT, answer TEXT,
         status TEXT, ts TEXT)""")
+    # Вопросы с выбором варианта: в answer столбце лежит подпись варианта,
+    # а не свободный текст, поэтому нужно знать тип поля и список вариантов.
+    bank_cols = {r[1] for r in db.execute("PRAGMA table_info(answer_bank)")}
+    if "kind" not in bank_cols:
+        db.execute("ALTER TABLE answer_bank ADD COLUMN kind TEXT")
+    if "options" not in bank_cols:
+        db.execute("ALTER TABLE answer_bank ADD COLUMN options TEXT")
+    # Выбор храним отдельно от answer: один и тот же вопрос у одного
+    # работодателя бывает радиокнопкой, у другого — свободным полем,
+    # и затирать текстовый ответ подписью варианта нельзя.
+    if "choice" not in bank_cols:
+        db.execute("ALTER TABLE answer_bank ADD COLUMN choice TEXT")
+    if "choice_status" not in bank_cols:
+        db.execute("ALTER TABLE answer_bank ADD COLUMN choice_status TEXT")
+    db.commit()
     return db
 
 
@@ -586,13 +601,31 @@ def scrape_questions(page):
                     i.tagName === 'TEXTAREA' ? 'textarea'
                     : i.tagName === 'SELECT' ? 'select'
                     : (i.type || 'text')))];
-                const opts = [...b.querySelectorAll('label')]
-                    .map(l => (l.innerText || '').trim())
-                    .filter(Boolean);
+                // Варианты перечисляем по самим инпутам, а не по label: у вопроса
+                // все варианты делят общий name и различаются value, а подпись
+                // лежит в label[for=id]. Обход по label склеивал бы их в кучу.
+                const opts = inputs
+                    .filter(i => i.type === 'radio' || i.type === 'checkbox')
+                    .map(i => {
+                        let t = '';
+                        if (i.id) {
+                            const l = document.querySelector(
+                                `label[for="${CSS.escape(i.id)}"]`);
+                            if (l) t = (l.innerText || '').trim();
+                        }
+                        if (!t) {
+                            const l = i.closest('label');
+                            if (l) t = (l.innerText || '').trim();
+                        }
+                        return {label: t, value: i.value || '',
+                                name: i.name || '', checked: !!i.checked};
+                    })
+                    .filter(o => o.label);
                 return {
                     question: (q.innerText || '').trim(),
                     kind: kinds.join(',') || 'unknown',
-                    options: opts.slice(0, 12)
+                    options: opts.slice(0, 12).map(o => o.label),
+                    choices: opts.slice(0, 12)
                 };
             }).filter(q => q.question);
         }""")
