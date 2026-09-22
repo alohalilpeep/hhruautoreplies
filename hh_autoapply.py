@@ -636,7 +636,10 @@ def answer_questions(page, questions, bank=None, letter=""):
 
     for i, text in enumerate(plan):
         field = bodies.nth(i).locator("textarea, input[type=text]").first
-        if field.count() == 0:
+        # В смешанных анкетах поле «уточните» лежит в разметке скрытым и
+        # раскрывается только после выбора варианта. Заполнять его нельзя:
+        # fill() ждёт видимости 30 секунд и валит прогон в error.
+        if field.count() == 0 or not field.is_visible():
             return None
         field.fill(text)
         pause(0.5, 1.5)
