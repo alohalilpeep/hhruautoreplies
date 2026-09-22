@@ -239,7 +239,8 @@ def fill(db):
             continue
         seen.add(qn)
         db.execute(
-            "INSERT INTO answer_bank VALUES (?,?,?,?,?)",
+            "INSERT INTO answer_bank (qnorm, question, answer, status, ts) "
+            "VALUES (?,?,?,?,?)",
             (qn, question.strip(), "", "draft",
              dt.datetime.now().isoformat(timespec="seconds")))
         added += 1
