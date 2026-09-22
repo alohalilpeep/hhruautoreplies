@@ -86,12 +86,24 @@ GRADE_RE = re.compile(
     r"|junior|middle|senior|lead|jun|mid|sr|jr)\b[\s.\-–—]*", re.I)
 
 
+# грейд в конце названия: «Devops Middle» -> «Devops».
+# lead и главный сюда не входят: «Team Lead», «Tech Lead» — это сама должность.
+TAIL_GRADE_RE = re.compile(
+    r"[\s.,\-–—/]*\b(младш\w*|старш\w*|ведущ\w*|стаж[ёе]р\w*"
+    r"|junior|middle|senior|jun|mid|sr|jr)\s*$", re.I)
+
+
 def _strip_grade(text):
     t = re.sub(r"\s+", " ", text).strip(" .,-–—+")
     prev = None
     while prev != t:                             # «Ведущий старший инженер»
         prev = t
         t = GRADE_RE.sub("", t).strip(" .,-–—+")
+        # хвостовой грейд срезаем, только если что-то остаётся:
+        # название из одного слова «Middle» — это не грейд, а весь заголовок
+        tail = TAIL_GRADE_RE.sub("", t).strip(" .,-–—+")
+        if tail:
+            t = tail
     if t and t[0].islower():
         t = t[0].upper() + t[1:]
     return t
