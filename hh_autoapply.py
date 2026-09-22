@@ -1001,7 +1001,17 @@ def main():
                 f"SELECT id FROM responses WHERE status NOT IN ({placeholders})",
                 retry)}
             todo = [(vid, url) for vid, url in vacancies.items() if vid not in done]
-            print(f"Найдено {len(vacancies)}, новых {len(todo)}")
+            # Отложенные вакансии стареют и выпадают из выдачи: к моменту,
+            # когда ответ на их вопросы появился в банке, поиск их уже не
+            # показывает. Из выдачи они не вернутся никогда, поэтому берём
+            # их из базы по сохранённому URL.
+            seen = set(vacancies)
+            deferred = [(vid, url) for vid, url in db.execute(
+                f"SELECT id, url FROM responses WHERE status IN ({placeholders})",
+                retry) if vid not in seen and url]
+            todo += deferred
+            print(f"Найдено {len(vacancies)}, новых {len(todo) - len(deferred)}, "
+                  f"отложенных из базы {len(deferred)}")
 
             for vid, url in todo:
                 if applied_today(db) >= DAILY_LIMIT:
