@@ -409,6 +409,28 @@ class LimitReached(Exception):
     pass
 
 
+def letter_required(page):
+    """Работодатель требует сопроводительное письмо к этой вакансии."""
+    if visible_text(page, LETTER_REQUIRED_RE):
+        return True
+    # На странице анкеты формулировка другая — «Сопроводительное письмо
+    # обязательное для этой вакансии», — и hh разбивает её на несколько
+    # элементов: целиком её не содержит ни один, поэтому get_by_text молчит.
+    # Матчим по собранному тексту формы. Чтобы не принять за требование
+    # схлопнутый блок в разметке (как было с hidden-resume-warning),
+    # засчитываем только когда поле письма реально на экране.
+    area = page.locator(SEL["letter_input"])
+    if area.count() == 0 or not area.first.is_visible():
+        return False
+    scope = (page.locator(SEL["popup"]) if visible(page, SEL["popup"])
+             else page.locator("body"))
+    try:
+        txt = scope.first.evaluate("e => e.innerText")
+    except Exception:
+        return False
+    return bool(LETTER_REQUIRED_RE.search(txt or ""))
+
+
 def pause(a, b):
     time.sleep(random.uniform(a, b))
 
@@ -566,7 +588,7 @@ def scrape_questions(page):
         return []
 
 
-def answer_questions(page, questions, bank=None):
+def answer_questions(page, questions, bank=None, letter=""):
     """Заполнить анкету работодателя и отправить отклик.
 
     Источники ответа, в порядке приоритета:
@@ -578,6 +600,7 @@ def answer_questions(page, questions, bank=None):
     поле не текстовое (радиокнопку за человека выбирать нельзя); или число полей
     не сошлось с числом вопросов.
     """
+    global LAST_LETTER_SENT
     if not AUTO_ANSWER or not questions:
         return None
     bank = bank or {}
@@ -606,16 +629,41 @@ def answer_questions(page, questions, bank=None):
         field.fill(text)
         pause(0.5, 1.5)
 
+    # На части вакансий рядом с анкетой висит обязательное сопроводительное
+    # письмо. Без него форма молча не отправляется: кнопка нажимается, отклика
+    # нет. Поэтому письмо заполняем здесь же, до отправки.
+    need = letter_required(page)
+    letter_sent = False
+    if need and (LETTER_MODE == "never" or not letter):
+        return "needs_letter"
+    if letter and (need or LETTER_MODE == "always"):
+        toggle = page.locator(SEL["letter_toggle"])
+        if toggle.count() and not visible(page, SEL["letter_input"]):
+            toggle.first.click()
+            pause(0.5, 1.5)
+        area = page.locator(SEL["letter_input"])
+        if area.count() and area.first.is_visible():
+            area.first.fill(letter)
+            letter_sent = True
+            pause(1, 2)
+        elif need:
+            return "needs_letter"      # требуют, а поля нет — не отправляем
+
     submit = page.locator(SEL["popup_submit"])
     if submit.count() == 0:
         return None
+    LAST_LETTER_SENT = letter_sent
     submit.first.click()
     pause(3, 5)
 
     if page.get_by_text(LIMIT_RE).count():
         raise LimitReached()
-    if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
-        return "answered"
+    # hh обновляет страницу не мгновенно, первая проверка даёт ложный unknown
+    for attempt in range(4):
+        if page.locator(SEL["already"]).count() or page.get_by_text(DONE_RE).count():
+            return "answered"
+        if attempt < 3:
+            page.wait_for_timeout(2500)
     return "unknown"
 
 
@@ -673,6 +721,9 @@ def apply(page, url, db=None):
         reloc.first.click()
         pause(1, 2)
 
+    # в базу пишем сырой заголовок, в письмо — очищенный
+    letter = render_letter(clean_title(title), company)
+
     # вакансия с вопросами или тестом, оставляем на ручной разбор.
     # Заодно складываем вопросы в пул: их видно только отсюда.
     if "vacancy_response" in page.url or page.locator(SEL["task"]).count():
@@ -687,14 +738,15 @@ def apply(page, url, db=None):
                            for q in qs):
             return "skipped_question", title, company
 
-        answered = answer_questions(page, qs, load_answer_bank(db))
+        answered = answer_questions(page, qs, load_answer_bank(db), letter)
+        if answered == "needs_letter":
+            return "needs_letter", title, company
         if answered:
-            print(f"    анкета заполнена, вопросов: {len(qs)}")
+            print(f"    анкета заполнена, вопросов: {len(qs)}"
+                  + (", с письмом" if LAST_LETTER_SENT else ""))
             return answered, title, company
         return "questions", title, company
 
-    # в базу пишем сырой заголовок, в письмо — очищенный
-    letter = render_letter(clean_title(title), company)
     letter_sent = False
 
     submit = page.locator(SEL["popup_submit"])
@@ -710,16 +762,16 @@ def apply(page, url, db=None):
             close_popup(page)
             return "resume_hidden", title, company
 
-        letter_required = visible_text(page, LETTER_REQUIRED_RE)
+        need_letter = letter_required(page)
 
         # письмо обязательно, а режим его запрещает: закрываем попап
         # и откладываем вакансию, ничего не отправив
-        if letter_required and LETTER_MODE == "never":
+        if need_letter and LETTER_MODE == "never":
             close_popup(page)
             return "needs_letter", title, company
 
         # пишем, только если работодатель требует или режим always
-        if letter_required or LETTER_MODE == "always":
+        if need_letter or LETTER_MODE == "always":
             toggle = page.locator(SEL["letter_toggle"])
             if toggle.count():
                 toggle.first.click()
