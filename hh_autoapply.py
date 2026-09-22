@@ -836,11 +836,17 @@ def main():
                 return
 
             vacancies = collect(page)
-            # needs_letter ждёт SEND_LETTER=True, resume_hidden — смены видимости
+            # needs_letter ждёт LETTER_MODE, resume_hidden — смены видимости
             # резюме. Обработанными их не считаем, вернутся на следующем запуске.
+            retry = ["error", "dry_run", "needs_letter", "resume_hidden"]
+            # Вакансии с вопросами тоже возвращаем в работу, когда включён
+            # автоответ: в прошлый раз отвечать было нечем, а теперь есть банк.
+            if AUTO_ANSWER:
+                retry.append("questions")
+            placeholders = ",".join("?" * len(retry))
             done = {r[0] for r in db.execute(
-                "SELECT id FROM responses WHERE status NOT IN "
-                "('error', 'dry_run', 'needs_letter', 'resume_hidden')")}
+                f"SELECT id FROM responses WHERE status NOT IN ({placeholders})",
+                retry)}
             todo = [(vid, url) for vid, url in vacancies.items() if vid not in done]
             print(f"Найдено {len(vacancies)}, новых {len(todo)}")
 

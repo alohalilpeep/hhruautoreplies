@@ -129,7 +129,9 @@ def export(db, path=EDIT_FILE):
 
 
 def _parse_status(raw):
-    low = (raw or "").strip().lower()
+    # в строке статуса может быть пометка в скобках — она не мешает
+    raw = re.sub(r"[\[(].*", "", raw or "").strip()
+    low = raw.split()[0].lower() if raw.split() else ""
     for canon, words in STATUS_WORDS.items():
         if low in words:
             return canon
@@ -177,6 +179,9 @@ def import_(db, path=EDIT_FILE):
             unknown.append(ident)
             continue
 
+        # комментарии-разделители, случайно попавшие в хвост ответа
+        while answer_lines and answer_lines[-1].lstrip().startswith("#"):
+            answer_lines.pop()
         answer = "\n".join(answer_lines).strip()
         status = _parse_status(fields.get("СТАТУС"))
         if fields.get("СТАТУС") and status is None:
