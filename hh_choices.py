@@ -131,6 +131,11 @@ STACK_RE = re.compile(
     r"|nexus|postgres|mongo|clickhouse|redis|kafka|rabbit|linux|bash|python"
     r"|swarm|ceph|vmware|kvm|qemu|git\b", re.I)
 
+# Взаимоисключающие варианты: отмечать их вместе с остальными бессмысленно
+NONE_RE = re.compile(
+    r"^ни\s|^нет\s*опыта|^не\s+работал|^не\s+могу\s+оценить"
+    r"|^документ\s+отсутствует|^ничего\s+из", re.I)
+
 YES_RE = re.compile(r"^\s*да\b", re.I)
 NO_RE = re.compile(r"^\s*нет\b", re.I)
 
@@ -272,11 +277,24 @@ def import_(db, path=EDIT_FILE):
         picked = split_options(choice)
         # одобрять можно только то, что реально есть среди вариантов
         if status == "approved":
+            row = db.execute("SELECT kind FROM answer_bank WHERE qnorm=?",
+                             (qnorm,)).fetchone()
+            kind = (row[0] if row else "") or ""
             unknown = [p for p in picked if p not in valid]
-            if not picked or unknown:
-                print(f"  пропущен {qnorm[:8]}: "
-                      + ("пустой выбор" if not picked
-                         else f"нет таких вариантов: {unknown}"))
+            single = "radio" in kind and "checkbox" not in kind
+            excl = [p for p in picked if NONE_RE.match(p)]
+            if not picked:
+                why = "пустой выбор"
+            elif unknown:
+                why = f"нет таких вариантов: {unknown}"
+            elif single and len(picked) > 1:
+                why = f"это радиокнопка, вариант должен быть один: {picked}"
+            elif excl and len(picked) > 1:
+                why = f"«{excl[0]}» нельзя совмещать с другими вариантами"
+            else:
+                why = ""
+            if why:
+                print(f"  пропущен {qnorm[:8]}: {why}")
                 bad += 1
                 continue
         db.execute("UPDATE answer_bank SET choice=?, choice_status=? "
