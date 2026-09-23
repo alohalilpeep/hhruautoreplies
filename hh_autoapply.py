@@ -511,6 +511,14 @@ def init_db():
         chat_id TEXT, msg_id TEXT, company TEXT, vacancy TEXT,
         question TEXT, options TEXT, ts TEXT,
         PRIMARY KEY (chat_id, msg_id))""")
+    # Все сообщения из чатов, а не только вопросы. Отказы, приглашения и
+    # обычные реплики HR раньше просто выбрасывались, хотя именно в них
+    # виден реальный интерес: теги hh показывают 0 приглашений даже тогда,
+    # когда в чатах зовут на созвон.
+    db.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
+        chat_id TEXT, msg_id TEXT, company TEXT, vacancy TEXT,
+        author TEXT, text TEXT, kind TEXT, ts TEXT,
+        PRIMARY KEY (chat_id, msg_id))""")
     # банк ответов для чатов, тоже отдельный
     db.execute("""CREATE TABLE IF NOT EXISTS chat_answers (
         qnorm TEXT PRIMARY KEY, question TEXT, options TEXT,
