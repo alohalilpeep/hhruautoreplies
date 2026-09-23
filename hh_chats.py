@@ -175,14 +175,17 @@ def classify_message(text, author=""):
         return "бот"
     if REJECT_RE.search(t):
         return "отказ"
+    # Живой вопрос важнее вежливого вступления: HR часто начинает с
+    # «Спасибо за отклик!», а дальше идут настоящие вопросы, и по шаблону
+    # такое письмо уезжало в автоответы.
+    if is_question(t):
+        return "вопрос"
     if AUTO_RE.search(t):
         return "автоответ"
     if SCREEN_RE.search(t):
         return "скрининг"
     if INVITE_RE.search(t):
         return "приглашение"
-    if is_question(t):
-        return "вопрос"
     return "инфо"
 
 
@@ -194,7 +197,54 @@ def is_question(text):
     return not NOISE_RE.search(t)
 
 
-def scan(limit=None):
+# Наши же сообщения и элементы интерфейса, попавшие в выдачу как реплики.
+# hh не помечает автора у исходящих, поэтому опознаём по началу письма.
+OWN_RE = re.compile(r"^Добрый день, заинтересовала", re.I)
+UI_RE = re.compile(
+    r"^(без сопроводительного|добавить сопроводительное|начн[её]м)", re.I)
+# Зовут поговорить, но словами, под которые шаблон не подгонишь
+LEAD_RE = re.compile(
+    r"интересное резюме|хотели бы.{0,30}(связат|обсуд)|позвоните|наберите"
+    r"|предлагаю (созвон|встреч|пообщ)|когда (вам )?(будет )?удобно"
+    r"|давайте (созвон|обсуд|пообщ)|напишите в чат|свяжитесь", re.I)
+
+
+def attention(db=None):
+    """Чаты, куда стоит заглянуть самому. Ничего не отправляет.
+
+    Берём те, где последнее слово осталось за работодателем и это вопрос
+    или приглашение. Чаты с отказом пропускаем: смотреть там нечего.
+    """
+    db = db or init_db()
+    chats = {}
+    for cid, comp, vac, auth, text, kind in db.execute(
+            "SELECT chat_id, company, vacancy, author, text, kind "
+            "FROM chat_messages ORDER BY rowid"):
+        flat = re.sub(r"\s+", " ", text or "").strip()
+        if OWN_RE.match(flat) or UI_RE.match(flat):
+            continue
+        chats.setdefault(cid, {"c": comp, "v": vac, "m": []})
+        chats[cid]["m"].append((kind, auth, flat))
+
+    need = []
+    for cid, d in chats.items():
+        if any(k == "отказ" for k, _, _ in d["m"]):
+            continue
+        kind, auth, text = d["m"][-1]
+        lead = bool(LEAD_RE.search(text))
+        if kind in ("вопрос", "приглашение") or lead:
+            need.append((cid, d, "приглашение" if lead else kind, auth, text))
+    need.sort(key=lambda x: 0 if x[2] == "приглашение" else 1)
+
+    print(f"\n=== стоит заглянуть: {len(need)} чатов\n")
+    for cid, d, kind, auth, text in need:
+        print(f"[{kind.upper()}] {d['c'][:34]} — {d['v'][:44]}")
+        print(f"   {auth or '—'}: {text[:170]}")
+        print(f"   https://hh.ru/chat/{cid}\n")
+    return need
+
+
+def scan(limit=None, only_new=False):
     db = init_db()
     if not hh.PROFILE_ID:
         raise SystemExit("PROFILE_ID не задан, заполни .env")
@@ -209,6 +259,17 @@ def scan(limit=None):
         try:
             chats = list_chats(page)
             print(f"чатов в списке: {len(chats)}")
+            if only_new:
+                # Полный обход трёхсот чатов занимает около часа. В чат, где
+                # мы уже были и нового не появилось, заходить незачем:
+                # берём непрочитанные и те, которых ещё нет в базе.
+                seen = {r[0] for r in db.execute(
+                    "SELECT DISTINCT chat_id FROM chat_messages")}
+                total = len(chats)
+                chats = [c for c in chats
+                         if c["id"] not in seen or c["unread"]]
+                print(f"из них новых или с непрочитанным: {len(chats)} "
+                      f"(пропускаю {total - len(chats)})")
             if limit:
                 chats = chats[:limit]
                 print(f"ограничение: обхожу первые {len(chats)}")
@@ -307,7 +368,9 @@ def main():
     elif "--scan" in args:
         i = args.index("--scan")
         limit = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
-        scan(limit)
+        scan(limit, only_new="--new" in args)
+    elif "--attention" in args:
+        attention()
     elif "--list" in args:
         show(init_db())
     else:
