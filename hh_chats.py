@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 import hh_autoapply as hh
 from hh_autoapply import init_db, normalize_question
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
 CHAT_LIST = "https://hh.ru/chat"
 # Собеседники, чьи реплики имеет смысл собирать. Своё имя сюда не попадает:
@@ -99,7 +99,15 @@ def list_chats(page):
 def read_chat(page, chat_id):
     """Сообщения робота и текущие варианты ответа. Ничего не нажимает."""
     page.goto(f"https://hh.ru/chat/{chat_id}", wait_until="commit")
-    page.wait_for_timeout(6000)
+    # Раньше тут стояло глухое ожидание в 6 секунд на каждый чат. Обычно
+    # сообщения появляются гораздо раньше, поэтому ждём их саму разметку,
+    # а фиксированный таймаут оставляем только как запасной путь.
+    try:
+        page.wait_for_selector('[data-qa^="chatik-chat-message-"]',
+                               timeout=8000)
+        page.wait_for_timeout(600)   # добрать хвост серии сообщений
+    except PWTimeout:
+        page.wait_for_timeout(1500)  # пустой чат или медленная отдача
 
     # Имя автора hh показывает только у первого сообщения серии, поэтому
     # тянем последнего известного автора вперёд.
@@ -309,7 +317,9 @@ def scan(limit=None, only_new=False):
                 flag = f" (непрочитано {c['unread']})" if c["unread"] else ""
                 print(f"  [{c['id']}] {c['company'][:28]:28s} "
                       f"вопросов: {len(questions)}{flag}")
-                hh.pause(2, 4)
+                # Пауза между чатами короче, чем в прогоне откликов: здесь
+                # мы только читаем и ничего не отправляем.
+                hh.pause(0.6, 1.4)
         finally:
             page.close()
             hh.close_profile()
