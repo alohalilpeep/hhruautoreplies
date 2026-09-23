@@ -75,8 +75,12 @@ def list_chats(page):
     page.goto(CHAT_LIST, wait_until="commit")
     page.wait_for_timeout(9000)
 
+    # Ограничение на число прокруток — предохранитель от бесконечного цикла,
+    # а не способ остановиться: выход по stale, когда список перестал расти.
+    # При 60 итерациях обход упирался в потолок ровно на 300 чатах и молча
+    # терял хвост списка, поэтому запас с большим запасом.
     found, stale = {}, 0
-    for _ in range(60):
+    for _ in range(400):
         before = len(found)
         for c in page.evaluate(SNAPSHOT_JS):
             found.setdefault(c["id"], c)
