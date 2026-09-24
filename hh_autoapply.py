@@ -835,6 +835,48 @@ def answer_questions(page, questions, bank=None, letter="", choices=None):
     return "unknown"
 
 
+def apply_reacted(page, pages_before):
+    """Клик по «Откликнуться» дал хоть какую-то реакцию."""
+    if len(page.context.pages) > pages_before:
+        return True                                  # внешний сайт
+    if "vacancy_response" in page.url:
+        return True                                  # страница анкеты
+    if page.locator(SEL["task"]).count():
+        return True                                  # вопросы работодателя
+    if visible(page, SEL["popup"]):
+        return True                                  # попап отклика
+    if page.locator(SEL["already"]).count():
+        return True                                  # мгновенный отклик
+    if page.get_by_text(DONE_RE).count():
+        return True
+    return page.get_by_text(LIMIT_RE).count() > 0    # упёрлись в лимит hh
+
+
+def click_apply(page, btn, pages_before, tries=3):
+    """Нажать «Откликнуться» и дождаться реакции страницы.
+
+    hh — SPA: после domcontentloaded кнопка уже нарисована, но обработчик
+    может быть ещё не привешен, и клик уходит в никуда. На быстром профиле
+    это незаметно, на медленном — половина откликов молча не уходила, а
+    кнопка оставалась на месте. Поэтому кликаем и проверяем, что что-то
+    произошло, а не просто ждём фиксированную паузу.
+    """
+    for attempt in range(tries):
+        try:
+            btn.click()
+        except Exception:
+            return False
+        for _ in range(10):                          # до ~5 секунд на реакцию
+            page.wait_for_timeout(500)
+            if apply_reacted(page, pages_before):
+                pause(1, 2)                          # дать попапу дорисоваться
+                return True
+        if attempt < tries - 1:
+            print("    клик не сработал, пробую ещё раз")
+            pause(1.5, 3)
+    return False
+
+
 def close_popup(page):
     """Закрыть попап отклика, ничего не отправляя."""
     btn = page.locator(SEL["popup_close"])
@@ -871,8 +913,12 @@ def apply(page, url, db=None):
         return "dry_run", title, company
 
     pages_before = len(page.context.pages)
-    btn.click()
-    pause(2, 4)
+    if not click_apply(page, btn, pages_before):
+        # Клик не дал никакой реакции: ни попапа, ни анкеты, ни подтверждения,
+        # ни новой вкладки, а кнопка осталась на месте. Обычно страница ещё
+        # не довесила обработчики. Отправлять дальше нечего — откладываем,
+        # вакансия вернётся на следующем запуске.
+        return "no_reaction", title, company
 
     # новая вкладка = отклик на сайте работодателя, пропускаем
     if len(page.context.pages) > pages_before:
@@ -1011,7 +1057,7 @@ def main():
             # подтверждения не увидели. Считать такую вакансию обработанной
             # нельзя, иначе она молча теряется навсегда.
             retry = ["error", "dry_run", "needs_letter", "resume_hidden",
-                     "unknown"]
+                     "unknown", "no_reaction"]
             # Вакансии с вопросами тоже возвращаем в работу, когда включён
             # автоответ: в прошлый раз отвечать было нечем, а теперь есть банк.
             if AUTO_ANSWER:
