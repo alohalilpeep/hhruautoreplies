@@ -78,6 +78,45 @@ HEADER = """\
 """
 
 
+KNOWLEDGE_FILE = Path(__file__).with_name("knowledge.txt")
+
+
+def load_knowledge():
+    """База знаний: один факт на тему вместо копии ответа на каждый вопрос.
+
+    Отсюда берутся ЧЕРНОВИКИ ответов на новые вопросы. Работодателю уходит
+    только одобренное из банка — база знаний сама ничего не отправляет,
+    иначе вопрос про незнакомую технологию получил бы общий ответ по теме.
+    """
+    try:
+        raw = KNOWLEDGE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    out = []
+    for block in re.split(r"(?m)^== ", raw)[1:]:
+        lines = block.splitlines()
+        topic = lines[0].strip()
+        keys = next((l.split(":", 1)[1].strip() for l in lines[1:]
+                     if l.startswith("ключи:")), "")
+        body = "\n".join(l for l in lines[1:]
+                         if not l.startswith("ключи:")).strip()
+        if not (topic and keys and body):
+            continue
+        try:
+            out.append((topic, re.compile(keys, re.I), body))
+        except re.error:
+            print(f"  база знаний: не разобрал ключи темы «{topic}»")
+    return out
+
+
+def draft_from_knowledge(question, knowledge):
+    """Черновик ответа по теме. Возвращает (тема, ответ) или (None, '')."""
+    for topic, rx, body in knowledge:
+        if rx.search(question):
+            return topic, body
+    return None, ""
+
+
 def qid(qnorm):
     """Короткий стабильный якорь вопроса для txt-файла."""
     return hashlib.sha1(qnorm.encode("utf-8")).hexdigest()[:8]
@@ -244,20 +283,29 @@ def import_(db, path=EDIT_FILE):
 def fill(db):
     """Завести в банке строку на каждый уникальный вопрос из пула."""
     seen = {q for (q,) in db.execute("SELECT qnorm FROM answer_bank")}
-    added = 0
+    knowledge = load_knowledge()
+    added, prefilled = 0, 0
     for (question,) in db.execute("SELECT question FROM questions"):
         qn = normalize_question(question)
         if not qn or qn in seen:
             continue
         seen.add(qn)
+        # черновик по теме, если база знаний узнала вопрос: одобрять всё равно
+        # человеку, но писать один и тот же ответ в 37-й раз уже не нужно
+        topic, answer = draft_from_knowledge(question, knowledge)
+        if answer:
+            prefilled += 1
         db.execute(
             "INSERT INTO answer_bank (qnorm, question, answer, status, ts) "
             "VALUES (?,?,?,?,?)",
-            (qn, question.strip(), "", "draft",
+            (qn, question.strip(), answer, "draft",
              dt.datetime.now().isoformat(timespec="seconds")))
         added += 1
     db.commit()
     print(f"заведено новых вопросов: {added}, всего в банке: {len(seen)}")
+    if added:
+        print(f"из них с черновиком из базы знаний: {prefilled}, "
+              f"пустых: {added - prefilled}")
 
 
 def show(db, only=None):
