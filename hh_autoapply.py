@@ -39,6 +39,9 @@ ACCOUNT_NAME = (os.getenv("ACCOUNT_NAME", "").strip()
 SEARCH_URL = os.getenv("SEARCH_URL", "")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))          # сколько страниц выдачи обходить
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит откликов в сутки
+# Сколько откликов подряд без подтверждения считать отказом hh принимать
+# отклики. Дальше прогон останавливается сам.
+UNKNOWN_STREAK = int(os.getenv("UNKNOWN_STREAK", "8"))
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
 # Версия резюме. Штампуется на каждый отклик, чтобы потом сравнивать
 # конверсию разных редакций: поменял резюме — подними версию в .env.
@@ -1004,7 +1007,11 @@ def main():
             vacancies = collect(page)
             # needs_letter ждёт LETTER_MODE, resume_hidden — смены видимости
             # резюме. Обработанными их не считаем, вернутся на следующем запуске.
-            retry = ["error", "dry_run", "needs_letter", "resume_hidden"]
+            # unknown — это «мы не знаем», а не «сделано»: кликнули, но
+            # подтверждения не увидели. Считать такую вакансию обработанной
+            # нельзя, иначе она молча теряется навсегда.
+            retry = ["error", "dry_run", "needs_letter", "resume_hidden",
+                     "unknown"]
             # Вакансии с вопросами тоже возвращаем в работу, когда включён
             # автоответ: в прошлый раз отвечать было нечем, а теперь есть банк.
             if AUTO_ANSWER:
@@ -1026,6 +1033,7 @@ def main():
             print(f"Найдено {len(vacancies)}, новых {len(todo) - len(deferred)}, "
                   f"отложенных из базы {len(deferred)}")
 
+            unknown_row = 0
             for vid, url in todo:
                 if applied_today(db) >= DAILY_LIMIT:
                     print("Свой дневной лимит достигнут")
@@ -1046,6 +1054,19 @@ def main():
                         break
                     status, title, company = "error", "", ""
                     print(f"Ошибка на {url}: {e}")
+
+                # Подряд идущие unknown означают, что систематически ничего
+                # не проходит: hh придушил аккаунт, порвалась сессия или
+                # разъехались селекторы. Долбить дальше бессмысленно и
+                # выглядит как бот — на свежем аккаунте так сгорело
+                # сто вакансий подряд.
+                unknown_row = unknown_row + 1 if status == "unknown" else 0
+                if unknown_row >= UNKNOWN_STREAK:
+                    print(f"\n{UNKNOWN_STREAK} откликов подряд без подтверждения. "
+                          f"Похоже, hh перестал их принимать — останавливаюсь.\n"
+                          f"Вакансии не потеряны, вернутся на следующем запуске.")
+                    save(db, vid, url, title, company, status, LAST_LETTER_SENT)
+                    break
 
                 save(db, vid, url, title, company, status, LAST_LETTER_SENT)
                 mark = " +письмо" if LAST_LETTER_SENT else ""
