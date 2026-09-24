@@ -12,6 +12,7 @@
   4. --approve помечает ответы готовыми. Отправляются ТОЛЬКО approved:
      пока ответ в статусе draft, вакансия просто откладывается.
 
+    venv/bin/python hh_answers.py --new         НОВЫЕ вопросы в файл с датой
     venv/bin/python hh_answers.py --fill        завести строки под новые вопросы
     venv/bin/python hh_answers.py --export      выгрузить в answers_edit.txt
     venv/bin/python hh_answers.py --import      вернуть правки из txt в базу
@@ -22,7 +23,9 @@
     venv/bin/python hh_answers.py --purge "X"   заблокировать и вычистить её вопросы
     venv/bin/python hh_answers.py               сводка
 
-Обычный цикл: --fill → --export → правишь txt → --import
+Обычный цикл: --new → правишь файл → --import <файл>
+Имя файла: ДАТА_ВРЕМЯ_АККАУНТ.txt, чтобы при нескольких аккаунтах
+не перепутать, чьи вопросы правишь.
 """
 import datetime as dt
 import hashlib
@@ -33,7 +36,8 @@ import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from hh_autoapply import init_db, normalize_question, classify_question
+from hh_autoapply import (init_db, normalize_question, classify_question,
+                          ACCOUNT_NAME)
 
 EDIT_FILE = Path(__file__).with_name("answers_edit.txt")
 SEP = "-" * 3
@@ -89,11 +93,18 @@ def companies_for(db):
     return {k: sorted(set(v)) for k, v in out.items()}
 
 
-def export(db, path=EDIT_FILE):
+def export(db, path=EDIT_FILE, statuses=None):
+    """Выгрузить банк в txt. statuses ограничивает выгрузку статусами.
+
+    Частичная выгрузка безопасна: удалением считается только то, что пропало
+    из списка `# EXPORTED:` в шапке, а туда попадают ровно выгруженные блоки.
+    """
     comps = companies_for(db)
     rows = db.execute(
         "SELECT qnorm, question, answer, status FROM answer_bank"
     ).fetchall()
+    if statuses:
+        rows = [r for r in rows if r[3] in statuses]
     # сначала то, что требует внимания
     order = {"needs_input": 0, "draft": 1, "approved": 2}
     rows.sort(key=lambda r: (order.get(r[3], 3), r[1]))
@@ -125,7 +136,8 @@ def export(db, path=EDIT_FILE):
     print(f"выгружено {len(rows)} вопросов в {path.name}")
     for s, n in sorted(counts.items()):
         print(f"  {s:12s} {n}")
-    print(f"\nправь и возвращай:  venv/bin/python hh_answers.py --import")
+    if not statuses:        # при частичной выгрузке подсказку печатает вызвавший
+        print(f"\nправь и возвращай:  venv/bin/python hh_answers.py --import")
 
 
 def _parse_status(raw):
@@ -362,6 +374,28 @@ def purge_company(db, name):
     print("\nне забудь перевыгрузить файл: hh_answers.py --export")
 
 
+def export_new(db):
+    """Завести строки под новые вопросы и выгрузить только неотвеченные.
+
+    Файл называется по дате, времени и аккаунту, поэтому выгрузки не
+    перетирают друг друга и видно, чьи вопросы правишь: при нескольких
+    аккаунтах один общий answers_edit.txt слишком легко перепутать.
+    """
+    fill(db)
+    stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M")
+    path = Path(__file__).with_name(f"{stamp}_{ACCOUNT_NAME}.txt")
+    export(db, path, statuses=("draft", "needs_input"))
+    left = db.execute(
+        "SELECT COUNT(*) FROM answer_bank WHERE status IN ('draft','needs_input')"
+    ).fetchone()[0]
+    if left:
+        print(f"\nправь и возвращай:  venv/bin/python hh_answers.py "
+              f"--import {path.name}")
+    else:
+        print("\nновых вопросов нет, править нечего")
+    return path
+
+
 def main():
     db = init_db()
     args = sys.argv[1:]
@@ -377,7 +411,9 @@ def main():
     for a in args:
         if a.endswith(".txt"):
             path = Path(a)
-    if "--fill" in args:
+    if "--new" in args:
+        export_new(db)
+    elif "--fill" in args:
         fill(db)
     elif "--export" in args:
         export(db, path)

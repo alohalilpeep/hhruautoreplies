@@ -29,6 +29,11 @@ def _flag(name, default):
 BIT_API = os.getenv("BIT_API", "http://127.0.0.1:54345")
 BIT_API_KEY = os.getenv("BIT_API_KEY", "")   # если в настройках Local API включён ключ
 PROFILE_ID = os.getenv("PROFILE_ID", "")
+# Короткое имя аккаунта: попадает в имена выгружаемых файлов, чтобы не
+# перепутать, чьи вопросы правишь, когда аккаунтов несколько. По умолчанию
+# берётся имя каталога — у второго аккаунта он всё равно свой.
+ACCOUNT_NAME = (os.getenv("ACCOUNT_NAME", "").strip()
+                or Path(__file__).resolve().parent.name)
 
 # настрой поиск на hh руками со всеми фильтрами и положи URL в .env
 SEARCH_URL = os.getenv("SEARCH_URL", "")
