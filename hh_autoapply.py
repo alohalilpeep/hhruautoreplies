@@ -450,6 +450,34 @@ class LimitReached(Exception):
     pass
 
 
+class CaptchaFound(Exception):
+    """hh показал капчу — прогон надо прекращать, а не продолжать."""
+
+
+# hh подсовывает капчу, когда считает поведение автоматическим. Формулировки
+# у неё разные, поэтому ловим несколько.
+# Реальный текст со страницы hh: «Пройдите капчу. Чтобы подтвердить, что вы
+# не робот, введите текст с картинки».
+CAPTCHA_RE = re.compile(
+    r"пройдите\s+капчу|что\s+вы\s+не\s+робот|не\s*робот"
+    r"|введите\s+текст\s+с\s+картинки|введите\s+символы"
+    r"|captcha|капч", re.I)
+CAPTCHA_SEL = ('[data-qa*="captcha"], [class*="captcha"], '
+               'iframe[src*="captcha"], iframe[src*="recaptcha"]')
+
+
+def captcha_present(page):
+    """Капча на странице. Проверка дешёвая, зовём часто."""
+    try:
+        if page.locator(CAPTCHA_SEL).count():
+            return True
+        if "captcha" in page.url.lower():
+            return True
+        return bool(visible_text(page, CAPTCHA_RE))
+    except Exception:
+        return False
+
+
 def letter_required(page):
     """Работодатель требует сопроводительное письмо к этой вакансии."""
     if visible_text(page, LETTER_REQUIRED_RE):
@@ -912,8 +940,13 @@ def apply(page, url, db=None):
     if DRY_RUN:
         return "dry_run", title, company
 
+    if captcha_present(page):
+        raise CaptchaFound()
+
     pages_before = len(page.context.pages)
     if not click_apply(page, btn, pages_before):
+        if captcha_present(page):
+            raise CaptchaFound()
         # Клик не дал никакой реакции: ни попапа, ни анкеты, ни подтверждения,
         # ни новой вкладки, а кнопка осталась на месте. Обычно страница ещё
         # не довесила обработчики. Отправлять дальше нечего — откладываем,
@@ -1088,6 +1121,16 @@ def main():
                     status, title, company = apply(page, url, db)
                 except LimitReached:
                     print("hh пишет, что лимит откликов исчерпан")
+                    break
+                except CaptchaFound:
+                    # Капча означает, что hh считает поведение автоматическим.
+                    # Продолжать нельзя: дальше отклики всё равно не проходят,
+                    # а настойчивость приближает блокировку аккаунта.
+                    print(f"\nhh показал капчу — останавливаюсь.\n"
+                          f"Открой профиль, пройди капчу руками и запусти "
+                          f"снова. Вакансии не потеряны.\n"
+                          f"Если капча появляется часто, снизь DAILY_LIMIT "
+                          f"и увеличь паузы между откликами.")
                     break
                 except Exception as e:
                     # Профиль BitBrowser закрылся — чаще всего мак ушёл в сон.
