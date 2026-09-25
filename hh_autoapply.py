@@ -42,6 +42,8 @@ DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит от
 # Сколько откликов подряд без подтверждения считать отказом hh принимать
 # отклики. Дальше прогон останавливается сам.
 UNKNOWN_STREAK = int(os.getenv("UNKNOWN_STREAK", "8"))
+# Таймаут навигации, мс. Дефолт playwright — 30 секунд, для прокси мало.
+NAV_TIMEOUT = int(os.getenv("NAV_TIMEOUT", "90000"))
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
 # Версия резюме. Штампуется на каждый отклик, чтобы потом сравнивать
 # конверсию разных редакций: поменял резюме — подними версию в .env.
@@ -1076,6 +1078,10 @@ def main():
             browser = p.chromium.connect_over_cdp(ws)
             ctx = browser.contexts[0]
             page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            # Дефолтные 30 секунд слишком жёсткие для прокси: одна медленная
+            # страница превращалась в error на пустом месте. За прогон так
+            # сгорало по полдюжины вакансий.
+            page.set_default_navigation_timeout(NAV_TIMEOUT)
 
             page.goto("https://hh.ru", wait_until="domcontentloaded")
             pause(2, 3)
