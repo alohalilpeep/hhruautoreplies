@@ -107,11 +107,22 @@ def report(db=None):
     vac = {v for pairs in kept.values() for v, _ in pairs}
     print(f"вакансий в выборке: {len(vac)}, отброшено как не наш профиль: {len(dropped)}")
     print(f"уникальных навыков: {len(kept)}\n")
-    print(f"{'навык':32} {'вакансий':>8} {'компаний':>9}")
-    print("-" * 54)
-    for skill, pairs in sorted(kept.items(), key=lambda x: (-len(x[1]), x[0]))[:25]:
+    # Считаем по компаниям, а не по вакансиям. Одна кадровая контора
+    # размещает сорок одинаковых вакансий, и по числу вакансий «Ремонт ПК»
+    # обгоняет Kubernetes. Спрос — это сколько РАЗНЫХ работодателей ищут.
+    rank = []
+    for skill, pairs in kept.items():
         comps = {c for _, c in pairs if c}
-        print(f"{skill[:32]:32} {len(pairs):8} {len(comps):9}")
+        if comps:
+            rank.append((skill, len(comps), len(pairs)))
+    rank.sort(key=lambda x: (-x[1], x[0]))
+
+    print(f"{'навык':32} {'компаний':>9} {'вакансий':>9}  пометка")
+    print("-" * 68)
+    for skill, nc, nv in rank[:25]:
+        # много вакансий на мало компаний — массовый постинг, а не спрос
+        mark = "← дубли одной компании" if nv / nc >= 4 else ""
+        print(f"{skill[:32]:32} {nc:9} {nv:9}  {mark}")
 
 
 def main():
