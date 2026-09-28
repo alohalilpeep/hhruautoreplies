@@ -535,8 +535,13 @@ def close_profile():
 
 
 # ================= База =================
-def init_db():
-    db = sqlite3.connect("hh_responses.db")
+# Путь к базе. Отдельной переменной — чтобы проверочный скрипт мог увести
+# запись во временный файл и не тронуть рабочие ответы.
+DB_PATH = os.getenv("DB_PATH", "hh_responses.db")
+
+
+def init_db(path=None):
+    db = sqlite3.connect(path or DB_PATH)
     db.execute("""CREATE TABLE IF NOT EXISTS responses (
         id TEXT PRIMARY KEY, url TEXT, title TEXT, company TEXT, status TEXT, ts TEXT)""")
     # версия резюме на момент отклика; в старых базах колонки нет
@@ -623,14 +628,39 @@ def init_db():
 
 
 def save_questions(db, vid, url, company, questions):
-    """Сложить вопросы работодателя в пул. Отклик при этом не отправляется."""
+    """Сложить вопросы работодателя в пул и завести их в банке.
+
+    Варианты ответа кладём в банк сразу: страница уже открыта, они уже
+    сняты. Раньше банк получал их отдельным проходом hh_choices --scan,
+    который повторно обходил те же самые вакансии — лишние сотни запросов
+    и лишний повод для капчи на ровном месте.
+    """
     ts = dt.datetime.now().isoformat(timespec="seconds")
     for i, q in enumerate(questions):
         db.execute(
             "INSERT OR REPLACE INTO questions VALUES (?,?,?,?,?,?,?,?)",
             (vid, url, company, i, q["question"], q["kind"],
              " | ".join(q["options"]), ts))
+        remember_question(db, q, ts)
     db.commit()
+
+
+def remember_question(db, q, ts=None):
+    """Завести вопрос в банке: тип поля и варианты. Ответы и статусы
+    не трогаем — их ставит человек."""
+    qn = normalize_question(q["question"])
+    if not qn:
+        return
+    ts = ts or dt.datetime.now().isoformat(timespec="seconds")
+    opts = " | ".join(q.get("options") or []) or None
+    if db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?", (qn,)).fetchone():
+        db.execute("UPDATE answer_bank SET kind=?, options=COALESCE(?, options) "
+                   "WHERE qnorm=?", (q.get("kind"), opts, qn))
+    else:
+        db.execute(
+            "INSERT INTO answer_bank (qnorm, question, answer, status, ts, "
+            "kind, options) VALUES (?,?,?,?,?,?,?)",
+            (qn, q["question"].strip(), "", "draft", ts, q.get("kind"), opts))
 
 
 def save(db, vid, url, title, company, status, letter_sent=False):

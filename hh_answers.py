@@ -140,8 +140,13 @@ def export(db, path=EDIT_FILE, statuses=None):
     """
     comps = companies_for(db)
     rows = db.execute(
-        "SELECT qnorm, question, answer, status FROM answer_bank"
+        "SELECT qnorm, question, answer, status, COALESCE(kind,'') FROM answer_bank"
     ).fetchall()
+    # Вопросы с выбором варианта сюда не попадают: текстом на радиокнопку
+    # не ответишь. Их место в choices_edit.txt, иначе человек пишет ответ,
+    # который никогда не будет применён.
+    rows = [r[:4] for r in rows
+            if "radio" not in r[4] and "checkbox" not in r[4]]
     if statuses:
         rows = [r for r in rows if r[3] in statuses]
     # сначала то, что требует внимания
