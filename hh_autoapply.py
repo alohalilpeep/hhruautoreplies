@@ -471,9 +471,12 @@ CAPTCHA_SEL = ('[data-qa*="captcha"], [class*="captcha"], '
 def captcha_present(page):
     """Капча на странице. Проверка дешёвая, зовём часто."""
     try:
-        if page.locator(CAPTCHA_SEL).count():
-            return True
         if "captcha" in page.url.lower():
+            return True
+        # Именно видимый: на странице логина hh держит скрытый пустой
+        # account-login-recaptcha, и проверка по наличию в разметке
+        # объявляла капчу там, где её нет.
+        if visible(page, CAPTCHA_SEL):
             return True
         return bool(visible_text(page, CAPTCHA_RE))
     except Exception:
