@@ -250,14 +250,19 @@ venv/bin/python hh_answers.py --approve-all # одобрить черновик�
 радиокнопкой, а у другого свободным полем, и затирать текстовый ответ
 подписью варианта нельзя.
 
+Отвечать на них отдельно не нужно: `hh_answers.py --new` выгружает всё
+одним файлом, где вторая часть — как раз вопросы с выбором. Правишь строки
+`ВЫБОР` и `СТАТУС` там же и возвращаешь тем же `--import`.
+
 ```bash
-venv/bin/python hh_choices.py --scan     # обойти отложенные вакансии и снять варианты
 venv/bin/python hh_choices.py --draft    # проставить черновики выбора
-venv/bin/python hh_choices.py --export   # выгрузить в choices_edit.txt
-# правишь choices_edit.txt: строки ВЫБОР и СТАТУС
+venv/bin/python hh_choices.py --list     # показать, что уже решено
+venv/bin/python hh_choices.py --export   # отдельная выгрузка, если нужна только она
 venv/bin/python hh_choices.py --import
-venv/bin/python hh_choices.py --list
 ```
+
+`--scan` остался для вакансий, которые прогон посетил до того, как начал
+складывать варианты в банк сам. Новым он не нужен.
 
 Форма отклика открывается **прямой ссылкой** `vacancy_response?vacancyId=…`,
 без нажатия «Откликнуться»: на части вакансий hh отправляет отклик мгновенно

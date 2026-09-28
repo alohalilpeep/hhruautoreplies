@@ -26,6 +26,9 @@
 Обычный цикл: --new → правишь файл → --import <файл>
 Имя файла: ДАТА_ВРЕМЯ_АККАУНТ.txt, чтобы при нескольких аккаунтах
 не перепутать, чьи вопросы правишь.
+
+Файл один, но из двух частей: сверху вопросы со свободным ответом,
+ниже — с выбором варианта. Обе части возвращаются одним --import.
 """
 import datetime as dt
 import hashlib
@@ -38,9 +41,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from hh_autoapply import (init_db, normalize_question, classify_question,
                           ACCOUNT_NAME)
+import hh_choices
 
 EDIT_FILE = Path(__file__).with_name("answers_edit.txt")
 SEP = "-" * 3
+
+PART1 = """
+# ======================================================================
+# ЧАСТЬ 1. ВОПРОСЫ СО СВОБОДНЫМ ОТВЕТОМ — пиши текст после «ОТВЕТ:»
+# ======================================================================
+"""
+
+PART2 = """
+# ======================================================================
+# ЧАСТЬ 2. ВОПРОСЫ С ВЫБОРОМ ВАРИАНТА — здесь текст не нужен
+#
+# Правь строку «ВЫБОР:» — подпись варианта ровно как в строке «ВАРИАНТЫ».
+# Для чекбоксов можно несколько, через « | ». Для радиокнопки — один.
+# Отправляется только approved, пустой выбор не отправляется никогда.
+# Строку «КЛЮЧ:» не трогай — по ней ответ возвращается на место.
+# ======================================================================
+"""
 
 # что писать в СТАТУС. Первое значение — каноническое, остальные синонимы
 STATUS_WORDS = {
@@ -173,6 +194,14 @@ def export(db, path=EDIT_FILE, statuses=None):
             f"{(answer or '').strip()}\n")
     chunks.append(SEP + "\n")
 
+    # Вопросы с выбором идут второй частью того же файла. Раньше они жили
+    # в отдельном choices_edit.txt, и человек правил две выгрузки подряд,
+    # каждый раз вспоминая, какая из них какая.
+    body2, n2 = hh_choices.render(db, statuses)
+    if n2:
+        chunks.append(PART2 + "\n" + SEP + "\n" + body2 + "\n")
+
+    chunks.insert(1, PART1)
     path.write_text("\n".join(chunks), encoding="utf-8")
     counts = {}
     for *_, status in rows:
@@ -180,6 +209,8 @@ def export(db, path=EDIT_FILE, statuses=None):
     print(f"выгружено {len(rows)} вопросов в {path.name}")
     for s, n in sorted(counts.items()):
         print(f"  {s:12s} {n}")
+    if n2:
+        print(f"  + с выбором варианта: {n2} (вторая часть файла)")
     if not statuses:        # при частичной выгрузке подсказку печатает вызвавший
         print(f"\nправь и возвращай:  venv/bin/python hh_answers.py --import")
 
@@ -281,6 +312,13 @@ def import_(db, path=EDIT_FILE):
         print(f"\nне принято ({len(bad_status)}):")
         for ident, why in bad_status:
             print(f"  {ident}: {why}")
+
+    # Вторая часть файла — вопросы с выбором. Свои блоки она узнаёт по
+    # строке КЛЮЧ, текстовая часть свои — по ID, поэтому один и тот же
+    # файл обе читают, не мешая друг другу.
+    if "КЛЮЧ:" in text:
+        print("\nвопросы с выбором варианта:")
+        hh_choices.import_(db, path)
     print()
     stats(db)
 

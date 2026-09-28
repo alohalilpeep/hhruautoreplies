@@ -233,16 +233,24 @@ HEAD = """# Выбор варианта в анкетах работодател
 """
 
 
-def export(db, path=EDIT_FILE):
+def render(db, statuses=None):
+    """Блоки вопросов с выбором. Отдельно от записи в файл: та же вёрстка
+    идёт второй частью в общую выгрузку hh_answers.
+
+    Строки ID здесь нет намеренно. Текстовая часть опознаёт свои блоки
+    ровно по ней, и, стой она тут, импорт принял бы вопрос с вариантами
+    за вопрос со свободным ответом.
+    """
     rows = db.execute(
         "SELECT qnorm, question, kind, options, choice, choice_status "
         "FROM answer_bank WHERE options IS NOT NULL AND options != '' "
         "ORDER BY CASE choice_status WHEN 'needs_input' THEN 0 "
         "WHEN 'draft' THEN 1 ELSE 2 END, question").fetchall()
-    out = [HEAD]
+    if statuses:
+        rows = [r for r in rows if (r[5] or "needs_input") in statuses]
+    out = []
     for qnorm, question, kind, options, choice, cstatus in rows:
         out.append(
-            f"ID: {qnorm[:8] if len(qnorm) > 8 else qnorm}\n"
             f"КЛЮЧ: {qnorm}\n"
             f"СТАТУС: {cstatus or 'needs_input'}\n"
             f"ТИП: {kind or '—'}\n"
@@ -250,9 +258,14 @@ def export(db, path=EDIT_FILE):
             f"ВАРИАНТЫ: {options}\n"
             f"ВЫБОР: {choice or ''}\n"
             "---")
+    return "\n".join(out), len(rows)
+
+
+def export(db, path=EDIT_FILE):
+    body, n = render(db)
     with open(path, "w", encoding="utf-8") as f:
-        f.write("\n".join(out) + "\n")
-    print(f"выгружено {len(rows)} в {path}")
+        f.write(HEAD + "\n" + body + "\n")
+    print(f"выгружено {n} в {path}")
 
 
 def import_(db, path=EDIT_FILE):
