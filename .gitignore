@@ -27,3 +27,11 @@ answers_edit.txt
 blacklist.txt
 chat_answers_edit.txt
 choices_edit.txt
+
+# старые выгрузки и логи прогонов: не удаляем, но и в репозиторий не тащим
+archive/
+backups/
+*.log
+choices_today.txt
+primer.txt
+parked.json
