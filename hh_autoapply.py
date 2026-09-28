@@ -543,6 +543,22 @@ def init_db():
         vacancy_id TEXT, url TEXT, company TEXT, idx INTEGER,
         question TEXT, kind TEXT, options TEXT, ts TEXT,
         PRIMARY KEY (vacancy_id, idx))""")
+    # Факты о самой вакансии, отдельно от нашего отклика: у них своя
+    # жизнь (снимаются со страницы, могут отсутствовать, описание тяжёлое),
+    # и responses не стоит раздувать полем, нужным раз в неделю.
+    db.execute("""CREATE TABLE IF NOT EXISTS vacancy_facts (
+        vacancy_id TEXT PRIMARY KEY,
+        salary_from INTEGER, salary_to INTEGER, currency TEXT,
+        experience TEXT, work_format TEXT, description TEXT, scraped_ts TEXT)""")
+    # По строке на навык: весь смысл затеи — GROUP BY skill. Со строкой
+    # «Kubernetes | Docker» каждый отчёт свёлся бы к перебору с LIKE.
+    db.execute("""CREATE TABLE IF NOT EXISTS vacancy_skills (
+        vacancy_id TEXT, skill_raw TEXT, skill TEXT,
+        PRIMARY KEY (vacancy_id, skill_raw))""")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_skills_skill "
+               "ON vacancy_skills(skill)")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_questions_vac "
+               "ON questions(vacancy_id)")
     # Вопросы робота-рекрутера из чатов hh. Отдельно от questions: там анкета
     # вакансии со свободным вводом, здесь диалог с готовыми вариантами ответа.
     db.execute("""CREATE TABLE IF NOT EXISTS chat_questions (
@@ -907,6 +923,120 @@ def click_apply(page, btn, pages_before, tries=3):
     return False
 
 
+FACTS_JS = r"""() => {
+    const q = s => { const n = document.querySelector(s);
+                     return n ? n.innerText.trim() : ""; };
+    // Ключевые навыки лежат обычными div без data-qa. Находим заголовок
+    // и поднимаемся, пока в поддереве не окажется больше одного листа.
+    let skills = [];
+    const h = [...document.querySelectorAll('h2')]
+        .find(e => /ключевые навыки/i.test(e.textContent || ''));
+    if (h) {
+        let box = h.parentElement;
+        for (let i = 0; i < 5 && box; i++) {
+            const leaves = [...box.querySelectorAll('*')]
+                .filter(e => e.children.length === 0
+                          && (e.innerText || '').trim()
+                          && !/ключевые навыки/i.test(e.innerText));
+            if (leaves.length >= 2) {
+                skills = leaves.map(e => e.innerText.trim()).slice(0, 40);
+                break;
+            }
+            box = box.parentElement;
+        }
+    }
+    // Только сама вилка. Широкий поиск по «salary» ловил ещё и вопрос
+    // анкеты «Какая оплата труда?» — это data-qa вида
+    // vacancy-response-question_salary_options, его надо исключить.
+    const salaryEl = [...document.querySelectorAll('[data-qa*="salary"]')]
+        .filter(e => !/question/i.test(e.getAttribute('data-qa') || ''))
+        .map(e => (e.innerText || '').trim())
+        .filter(t => t && /\d/.test(t))[0] || "";
+    return {
+        salary: salaryEl,
+        experience: q('[data-qa="vacancy-experience"]'),
+        work_format: q('[data-qa="work-formats-text"]')
+                       .replace(/^Формат работы:\s*/i, ''),
+        employment: q('[data-qa="common-employment-text"]'),
+        description: q('[data-qa="vacancy-description"]'),
+        skills: skills,
+    };
+}"""
+
+# «от 200 000 до 300 000 ₽ за месяц, на руки» / «250 000 ₽»
+SALARY_NUM_RE = re.compile(r"\d[\d\s ]{2,}")
+
+
+def parse_salary(text):
+    """Вилка из текста hh. Возвращает (от, до, валюта)."""
+    if not text:
+        return None, None, None
+    flat = text.replace(" ", " ")
+    nums = [int(re.sub(r"\s", "", m)) for m in SALARY_NUM_RE.findall(flat)]
+    nums = [n for n in nums if n >= 1000]          # отсечь «2 дня», «13%»
+    cur = ("RUB" if "₽" in flat or "руб" in flat.lower()
+           else "USD" if "$" in flat
+           else "EUR" if "€" in flat else None)
+    low = flat.lower()
+    if not nums:
+        return None, None, cur
+    if "от" in low and "до" in low and len(nums) >= 2:
+        return nums[0], nums[1], cur
+    if "от" in low:
+        return nums[0], None, cur
+    if "до" in low:
+        return None, nums[0], cur
+    return (nums[0], nums[0], cur) if len(nums) == 1 else (nums[0], nums[1], cur)
+
+
+def scrape_facts(page):
+    """Факты о вакансии со страницы. Ничего не нажимает."""
+    try:
+        return page.evaluate(FACTS_JS)
+    except Exception:
+        return None
+
+
+def save_facts(db, vid, facts):
+    """Сложить факты и навыки. Вызывается до ветвлений: чем больше вакансий
+    попадёт в выборку, тем меньше она смещена в сторону тех, на которые
+    удалось откликнуться."""
+    if db is None or not facts:
+        return
+    lo, hi, cur = parse_salary(facts.get("salary"))
+    # hh щедр на неразрывные пробелы, из-за них потом не совпадают сравнения
+    clean = lambda s: re.sub(r"\s+", " ", (s or "").replace("\xa0", " ")).strip() or None
+    db.execute(
+        "INSERT OR REPLACE INTO vacancy_facts VALUES (?,?,?,?,?,?,?,?)",
+        (vid, lo, hi, cur, clean(facts.get("experience")),
+         clean(facts.get("work_format")), facts.get("description") or None,
+         dt.datetime.now().isoformat(timespec="seconds")))
+    for raw in facts.get("skills") or []:
+        raw = re.sub(r"\s+", " ", raw).strip()
+        if raw and len(raw) <= 60:
+            db.execute("INSERT OR REPLACE INTO vacancy_skills VALUES (?,?,?)",
+                       (vid, raw, normalize_skill(raw)))
+    db.commit()
+
+
+# Синонимы: работодатели пишут одно и то же по-разному, а считать надо вместе.
+SKILL_ALIASES = {
+    "k8s": "Kubernetes", "кубернетес": "Kubernetes", "кубер": "Kubernetes",
+    "гитлаб": "GitLab", "gitlab ci": "GitLab CI", "gitlab ci/cd": "GitLab CI",
+    "постгрес": "PostgreSQL", "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
+    "линукс": "Linux", "ос linux": "Linux", "docker-compose": "Docker Compose",
+    "ci/cd": "CI/CD", "argo cd": "ArgoCD", "argocd": "ArgoCD",
+    "hashicorp vault": "Vault", "hcp vault": "Vault",
+}
+
+
+def normalize_skill(raw):
+    """Привести написание навыка к одному виду. skill_raw при этом хранится
+    рядом: нормализация наверняка врёт, и без исходника не разобраться."""
+    low = re.sub(r"\s+", " ", raw).strip().lower()
+    return SKILL_ALIASES.get(low, raw.strip())
+
+
 def close_popup(page):
     """Закрыть попап отклика, ничего не отправляя."""
     btn = page.locator(SEL["popup_close"])
@@ -929,6 +1059,14 @@ def apply(page, url, db=None):
     pause(2, 4)
     title = text_or(page, SEL["title"])
     company = text_or(page, SEL["company"])
+
+    # Факты о вакансии снимаем здесь, до всех ветвлений: страница уже открыта,
+    # лишних запросов ноль. Так в выборку попадают и чёрный список, и already,
+    # и no_button — иначе она была бы смещена в сторону вакансий, на которые
+    # удалось откликнуться.
+    m = re.search(r"/vacancy/(\d+)", url)
+    if db is not None and m:
+        save_facts(db, m.group(1), scrape_facts(page))
 
     # компания в стоп-листе: не откликаемся, ничего не кликаем
     if is_blacklisted(company):
