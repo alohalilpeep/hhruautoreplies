@@ -560,8 +560,13 @@ def init_db():
     # По строке на навык: весь смысл затеи — GROUP BY skill. Со строкой
     # «Kubernetes | Docker» каждый отчёт свёлся бы к перебору с LIKE.
     db.execute("""CREATE TABLE IF NOT EXISTS vacancy_skills (
-        vacancy_id TEXT, skill_raw TEXT, skill TEXT,
+        vacancy_id TEXT, skill_raw TEXT, skill TEXT, status TEXT,
         PRIMARY KEY (vacancy_id, skill_raw))""")
+    # Мусор помечаем, а не удаляем: по нему диагностируется сам сбор.
+    # Удалив однажды 327 таких строк, я потерял единственную возможность
+    # понять, с каких вакансий и почему они пришли.
+    if "status" not in {r[1] for r in db.execute("PRAGMA table_info(vacancy_skills)")}:
+        db.execute("ALTER TABLE vacancy_skills ADD COLUMN status TEXT")
     db.execute("CREATE INDEX IF NOT EXISTS idx_skills_skill "
                "ON vacancy_skills(skill)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_questions_vac "
@@ -1028,28 +1033,60 @@ def save_facts(db, vid, facts):
          dt.datetime.now().isoformat(timespec="seconds")))
     for raw in facts.get("skills") or []:
         raw = re.sub(r"\s+", " ", raw).strip()
-        if raw and len(raw) <= 60:
-            db.execute("INSERT OR REPLACE INTO vacancy_skills VALUES (?,?,?)",
-                       (vid, raw, normalize_skill(raw)))
+        if not raw:
+            continue
+        junk = is_junk_skill(raw)
+        db.execute("INSERT OR REPLACE INTO vacancy_skills VALUES (?,?,?,?)",
+                   (vid, raw, normalize_skill(raw), "junk" if junk else "ok"))
     db.commit()
 
 
 # Синонимы: работодатели пишут одно и то же по-разному, а считать надо вместе.
 SKILL_ALIASES = {
     "k8s": "Kubernetes", "кубернетес": "Kubernetes", "кубер": "Kubernetes",
-    "гитлаб": "GitLab", "gitlab ci": "GitLab CI", "gitlab ci/cd": "GitLab CI",
+    # GitLab и GitLab CI на практике означают одно и то же: у работодателя
+    # это и хранилище кода, и пайплайны. Порознь они делили спрос пополам.
+    "гитлаб": "GitLab", "gitlab": "GitLab", "gitlabci": "GitLab",
+    "gitlabcicd": "GitLab", "gitlabci/cd": "GitLab",
     "постгрес": "PostgreSQL", "postgres": "PostgreSQL", "postgresql": "PostgreSQL",
-    "линукс": "Linux", "ос linux": "Linux", "docker-compose": "Docker Compose",
-    "ci/cd": "CI/CD", "argo cd": "ArgoCD", "argocd": "ArgoCD",
-    "hashicorp vault": "Vault", "hcp vault": "Vault",
+    "линукс": "Linux", "ос linux": "Linux",
+    "dockercompose": "Docker Compose", "dockerswarm": "Docker Swarm",
+    "cicd": "CI/CD", "argocd": "ArgoCD",
+    "hashicorpvault": "Vault", "hcpvault": "Vault",
+    "mssql": "MS SQL", "mssqlserver": "MS SQL",
+    "yandexcloud": "Yandex Cloud", "aws": "AWS", "istio": "Istio",
+    "minio": "MinIO", "iac": "IaC", "gitops": "GitOps",
+    "victoriametrics": "VictoriaMetrics", "servicedesk": "Service Desk",
+    "helpdesk": "Helpdesk", "windows": "Windows", "cloudflare": "Cloudflare",
+    "dlink": "D-Link",
 }
+
+
+# Обрывки описания, которые обход иногда цепляет вместо блока навыков:
+# «Обязанности:», «Опыт работы с Kubernetes;», одиночная запятая.
+JUNK_SKILL_RE = re.compile(r"[:;]\s*$|^[\s.,;—-]+$|^(опыт|знание|умение|навык|готовность)\b", re.I)
+
+
+def is_junk_skill(raw):
+    s = re.sub(r"\s+", " ", raw or "").strip()
+    if not s or len(s) > 40:
+        return True
+    if JUNK_SKILL_RE.search(s):
+        return True
+    return len(s.split()) > 4          # навык — не предложение
 
 
 def normalize_skill(raw):
     """Привести написание навыка к одному виду. skill_raw при этом хранится
     рядом: нормализация наверняка врёт, и без исходника не разобраться."""
-    low = re.sub(r"\s+", " ", raw).strip().lower()
-    return SKILL_ALIASES.get(low, raw.strip())
+    s = re.sub(r"\s+", " ", raw).strip()
+    low = s.lower()
+    if low in SKILL_ALIASES:
+        return SKILL_ALIASES[low]
+    # Ключ без регистра и пунктуации: «GItlab-CI» и «GitLab CI», «MsSQL»
+    # и «MS SQL» — одно и то же, писали разные люди.
+    flat = re.sub(r"[\s\-_/.,()]+", "", low)
+    return SKILL_ALIASES.get(flat, s)
 
 
 def close_popup(page):

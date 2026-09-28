@@ -97,7 +97,8 @@ def report(db=None):
     db = db or hh.init_db()
     rows = db.execute("""
         SELECT s.skill, s.vacancy_id, COALESCE(r.company,''), COALESCE(r.title,'')
-        FROM vacancy_skills s LEFT JOIN responses r ON r.id = s.vacancy_id""").fetchall()
+        FROM vacancy_skills s LEFT JOIN responses r ON r.id = s.vacancy_id
+        WHERE COALESCE(s.status,'ok') = 'ok'""").fetchall()
     kept, dropped = {}, set()
     for skill, vid, company, title in rows:
         if off_profile(title):
