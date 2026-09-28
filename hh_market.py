@@ -6,6 +6,7 @@
     python hh_market.py --rescrape 250   пересобрать навыки новым правилом
     python hh_market.py --refresh 14     перепроверить давно не виденные
     python hh_market.py --report         рейтинг навыков
+    python hh_market.py --sectors        навыки по отраслям
     python hh_market.py --merge ../hh_autoreply_2/hh_responses.db
 
 Сбор ничего не нажимает и не отправляет: открывает страницу вакансии и
@@ -15,6 +16,7 @@
 Факты о вакансии от аккаунта не зависят, а баз у нас несколько — поэтому
 есть --merge: подтянуть собранное другим аккаунтом в текущую базу.
 """
+import re
 import sqlite3
 import sys
 
@@ -188,6 +190,64 @@ def merge(other_path):
         db.execute("DETACH DATABASE src")
 
 
+# Отрасль по названию компании. Признак грубый: hh отрасль не отдаёт,
+# а название врёт — «Добрый. IT» это сок, «Полюс» золотодобыча. Поэтому
+# сектор считаем подсказкой, а не истиной, и долю «прочего» показываем.
+SECTORS = [
+    ("банки и финансы", r"банк|финанс|страхов|пенсион|платеж|платёж|кредит"
+                        r"|инвест|цупис|лизинг|брокер|бкс|втб|сбер|тинькофф|альфа"),
+    ("телеком",         r"мтс|ростелеком|ртк|мегафон|билайн|теле2|t2|телеком"),
+    ("промышленность",  r"завод|фабрик|металл|нефт|газ|хим|энерг|руд|уралхим|евраз"
+                        r"|полюс|транснефть|северсталь|норникель|машин|агро"),
+    ("инфобезопасность", r"positive|bi[.]?zone|adguard|security|безопасн|крипто"
+                        r"|инфотекс|касперск|kaspersky|солар"),
+    ("госсектор",       r"ржд|нии|росэлторг|правительств|департамент|министер"
+                        r"|гос|федеральн|администрац|почта россии"),
+    ("ритейл и е-ком",  r"ритейл|retail|магазин|wildberries|ozon|x5|лента"
+                        r"|м\.видео|детский мир|вкусвилл|маркет"),
+    ("ИТ и интеграторы", r"ит|it|tech|soft|digital|systems|систем|лаб"
+                        r"|интегратор|инновац|разработк|студия|group|групп"),
+]
+
+
+def sector_of(company):
+    low = (company or "").replace("\xa0", " ").lower()
+    for name, pat in SECTORS:
+        if re.search(pat, low):
+            return name
+    return "прочее"
+
+
+def sectors(db=None, top=8):
+    db = db or hh.init_db()
+    rows = db.execute("""
+        SELECT s.skill, s.vacancy_id, COALESCE(r.company,''), COALESCE(r.title,'')
+        FROM vacancy_skills s LEFT JOIN responses r ON r.id = s.vacancy_id
+        LEFT JOIN vacancy_facts f ON f.vacancy_id = s.vacancy_id
+        WHERE COALESCE(s.status,'ok')='ok' AND COALESCE(f.status,'active')='active'
+          AND r.company IS NOT NULL AND r.company != ''""").fetchall()
+    by = {}
+    comps = {}
+    for skill, vid, company, title in rows:
+        if off_profile(title):
+            continue
+        sec = sector_of(company)
+        by.setdefault(sec, {}).setdefault(skill, set()).add(company)
+        comps.setdefault(sec, set()).add(company)
+    order = sorted(comps, key=lambda s: -len(comps[s]))
+    total = sum(len(v) for v in comps.values())
+    print(f"компаний разложено по отраслям: {total}\n")
+    for sec in order:
+        n = len(comps[sec])
+        if n < 3:
+            continue
+        top_skills = sorted(by[sec].items(), key=lambda x: -len(x[1]))[:top]
+        share = lambda c: f"{len(c)*100//n}%"
+        print(f"=== {sec}  ({n} компаний)")
+        print("   " + " · ".join(f"{sk} {share(cs)}" for sk, cs in top_skills))
+        print()
+
+
 def off_profile(title):
     low = (title or "").lower()
     return any(w in low for w in OFF_PROFILE)
@@ -247,6 +307,8 @@ def main():
         if len(args) <= i + 1:
             raise SystemExit("укажи путь к базе: --merge ../other/hh_responses.db")
         merge(args[i + 1])
+    elif "--sectors" in args:
+        sectors()
     elif "--report" in args:
         report()
     else:
