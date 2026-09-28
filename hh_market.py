@@ -4,6 +4,7 @@
     python hh_market.py --collect        обойти выдачу и снять факты
     python hh_market.py --collect 40     ограничить числом вакансий
     python hh_market.py --rescrape 250   пересобрать навыки новым правилом
+    python hh_market.py --refresh 14     перепроверить давно не виденные
     python hh_market.py --report         рейтинг навыков
     python hh_market.py --merge ../hh_autoreply_2/hh_responses.db
 
@@ -121,6 +122,54 @@ def rescrape(limit=None):
     print(f"\nпересобрано: {done}, из них с навыками: {with_skills}")
 
 
+def refresh(days=14, limit=None):
+    """Перепроверить вакансии, которых давно не видели.
+
+    Без этого выборка застывает на дне сбора: закрытые вакансии копятся,
+    а рейтинг «что востребовано сейчас» становится архивным снимком.
+    """
+    db = hh.init_db()
+    todo = [r[0] for r in db.execute(
+        "SELECT vacancy_id FROM vacancy_facts "
+        "WHERE scraped_ts < datetime('now', ?) ORDER BY scraped_ts",
+        (f"-{days} day",))]
+    print(f"не проверялись больше {days} дней: {len(todo)}")
+    if limit:
+        todo = todo[:limit]
+    if not todo:
+        return
+    ws = hh.open_profile()
+    done = gone = 0
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(ws)
+        page = browser.contexts[0].new_page()
+        page.set_default_navigation_timeout(hh.NAV_TIMEOUT)
+        try:
+            for vid in todo:
+                try:
+                    page.goto(f"https://hh.ru/vacancy/{vid}",
+                              wait_until="domcontentloaded")
+                    hh.pause(1.5, 3)
+                    if hh.captcha_present(page):
+                        print("\nhh показал капчу — останавливаюсь.")
+                        break
+                    facts = hh.scrape_facts(page)
+                    db.execute("UPDATE vacancy_skills SET status='stale' "
+                               "WHERE vacancy_id=?", (vid,))
+                    hh.save_facts(db, vid, facts)
+                    done += 1
+                    gone += bool(facts and facts.get("archived"))
+                    if done % 25 == 0:
+                        print(f"  ...{done}, ушло в архив {gone}")
+                except Exception as e:
+                    print(f"  {vid}: {type(e).__name__}")
+                    if "closed" in str(e).lower():
+                        break
+        finally:
+            page.close()
+    print(f"\nперепроверено: {done}, из них закрылось: {gone}")
+
+
 def merge(other_path):
     """Подтянуть факты из базы другого аккаунта. Ключ — id вакансии,
     поэтому повтор безвреден."""
@@ -149,7 +198,9 @@ def report(db=None):
     rows = db.execute("""
         SELECT s.skill, s.vacancy_id, COALESCE(r.company,''), COALESCE(r.title,'')
         FROM vacancy_skills s LEFT JOIN responses r ON r.id = s.vacancy_id
-        WHERE COALESCE(s.status,'ok') = 'ok'""").fetchall()
+        LEFT JOIN vacancy_facts f ON f.vacancy_id = s.vacancy_id
+        WHERE COALESCE(s.status,'ok') = 'ok'
+          AND COALESCE(f.status,'active') = 'active'""").fetchall()
     kept, dropped = {}, set()
     for skill, vid, company, title in rows:
         if off_profile(title):
@@ -187,6 +238,10 @@ def main():
         i = args.index("--rescrape")
         lim = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
         rescrape(lim)
+    elif "--refresh" in args:
+        i = args.index("--refresh")
+        d = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else 14
+        refresh(d)
     elif "--merge" in args:
         i = args.index("--merge")
         if len(args) <= i + 1:

@@ -557,6 +557,16 @@ def init_db():
         vacancy_id TEXT PRIMARY KEY,
         salary_from INTEGER, salary_to INTEGER, currency TEXT,
         experience TEXT, work_format TEXT, description TEXT, scraped_ts TEXT)""")
+    # Когда увидели впервые, когда проверяли последний раз и жива ли ещё.
+    # Без этого выборка застывает на дне сбора: закрытые вакансии копятся,
+    # и рейтинг «что востребовано сейчас» превращается в архивный снимок.
+    fcols = {r[1] for r in db.execute("PRAGMA table_info(vacancy_facts)")}
+    for col in ("first_seen", "status", "published_at"):
+        if col not in fcols:
+            db.execute(f"ALTER TABLE vacancy_facts ADD COLUMN {col} TEXT")
+    db.execute("UPDATE vacancy_facts SET first_seen=scraped_ts "
+               "WHERE first_seen IS NULL")
+    db.execute("UPDATE vacancy_facts SET status='active' WHERE status IS NULL")
     # По строке на навык: весь смысл затеи — GROUP BY skill. Со строкой
     # «Kubernetes | Docker» каждый отчёт свёлся бы к перебору с LIKE.
     db.execute("""CREATE TABLE IF NOT EXISTS vacancy_skills (
@@ -1018,6 +1028,10 @@ FACTS_JS = r"""() => {
         employment: q('[data-qa="common-employment-text"]'),
         description: q('[data-qa="vacancy-description"]'),
         skills: skills,
+        // hh не даёт этому ни data-qa, ни отдельного элемента — только текст
+        archived: /вакансия\s+в\s+архиве|вакансия\s+закрыта/i.test(document.body.innerText),
+        published: (document.body.innerText
+            .match(/Вакансия опубликована\s+([^\n,]{4,40})/i) || [])[1] || "",
     };
 }"""
 
@@ -1047,6 +1061,26 @@ def parse_salary(text):
     return (nums[0], nums[0], cur) if len(nums) == 1 else (nums[0], nums[1], cur)
 
 
+MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
+          "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11,
+          "декабр": 12}
+
+
+def parse_ru_date(text):
+    """«8 сентября 2026» -> 2026-09-08. Пусто, если не разобрали."""
+    m = re.search(r"(\d{1,2})\s+([а-яё]+)\s+(\d{4})", text or "", re.I)
+    if not m:
+        return None
+    day, word, year = int(m.group(1)), m.group(2).lower(), int(m.group(3))
+    month = next((v for k, v in MONTHS.items() if word.startswith(k)), None)
+    if not month:
+        return None
+    try:
+        return dt.date(year, month, day).isoformat()
+    except ValueError:
+        return None
+
+
 def scrape_facts(page):
     """Факты о вакансии со страницы. Ничего не нажимает."""
     try:
@@ -1064,11 +1098,20 @@ def save_facts(db, vid, facts):
     lo, hi, cur = parse_salary(facts.get("salary"))
     # hh щедр на неразрывные пробелы, из-за них потом не совпадают сравнения
     clean = lambda s: re.sub(r"\s+", " ", (s or "").replace("\xa0", " ")).strip() or None
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    seen = db.execute("SELECT first_seen FROM vacancy_facts WHERE vacancy_id=?",
+                      (vid,)).fetchone()
     db.execute(
-        "INSERT OR REPLACE INTO vacancy_facts VALUES (?,?,?,?,?,?,?,?)",
+        "INSERT OR REPLACE INTO vacancy_facts "
+        "(vacancy_id, salary_from, salary_to, currency, experience, "
+        " work_format, description, scraped_ts, first_seen, status, published_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (vid, lo, hi, cur, clean(facts.get("experience")),
          clean(facts.get("work_format")), facts.get("description") or None,
-         dt.datetime.now().isoformat(timespec="seconds")))
+         now,                                   # когда проверяли в последний раз
+         (seen[0] if seen and seen[0] else now),  # когда увидели впервые
+         "archived" if facts.get("archived") else "active",
+         parse_ru_date(facts.get("published"))))
     for raw in facts.get("skills") or []:
         raw = re.sub(r"\s+", " ", raw).strip()
         if not raw:
