@@ -38,6 +38,10 @@ ACCOUNT_NAME = (os.getenv("ACCOUNT_NAME", "").strip()
 # настрой поиск на hh руками со всеми фильтрами и положи URL в .env
 SEARCH_URL = os.getenv("SEARCH_URL", "")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))          # сколько страниц выдачи обходить
+# Широкий запрос для анализа рынка: откликаемся по узкому SEARCH_URL,
+# а статистику собираем по этому. Пустой — используется SEARCH_URL.
+MARKET_URL = os.getenv("MARKET_URL", "").strip()
+MARKET_PAGES = int(os.getenv("MARKET_PAGES", "40"))
 DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит откликов в сутки
 # Сколько откликов подряд без подтверждения считать отказом hh принимать
 # отклики. Дальше прогон останавливается сам.
@@ -642,11 +646,19 @@ def text_or(page, sel, default=""):
         return default
 
 
-def collect(page):
+def collect(page, url=None, pages=None):
+    """Собрать id вакансий из выдачи.
+
+    url и pages задаются отдельно, когда обходим не свой поисковый запрос,
+    а широкий рыночный: откликаемся по узкому, а статистику собираем по
+    широкому, и лимиты у них разные.
+    """
+    url = url or SEARCH_URL
+    pages = pages or MAX_PAGES
     found = {}
-    sep = "&" if "?" in SEARCH_URL else "?"
-    for n in range(MAX_PAGES):
-        page.goto(f"{SEARCH_URL}{sep}page={n}", wait_until="domcontentloaded")
+    sep = "&" if "?" in url else "?"
+    for n in range(pages):
+        page.goto(f"{url}{sep}page={n}", wait_until="domcontentloaded")
         pause(2, 4)
         links = page.locator(SEL["serp_link"])
         if links.count() == 0:

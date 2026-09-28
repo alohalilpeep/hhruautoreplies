@@ -39,7 +39,10 @@ def collect(limit=None):
         page = browser.contexts[0].new_page()
         page.set_default_navigation_timeout(hh.NAV_TIMEOUT)
         try:
-            vacancies = hh.collect(page)
+            url = hh.MARKET_URL or hh.SEARCH_URL
+            if hh.MARKET_URL:
+                print(f"широкий рыночный запрос, до {hh.MARKET_PAGES} страниц")
+            vacancies = hh.collect(page, url, hh.MARKET_PAGES)
             todo = [(v, u) for v, u in vacancies.items() if v not in seen]
             print(f"в выдаче {len(vacancies)}, без фактов {len(todo)}")
             if limit:
