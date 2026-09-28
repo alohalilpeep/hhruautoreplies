@@ -969,6 +969,17 @@ FACTS_JS = r"""() => {
             return !(next.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING)
                    && e !== next && !next.contains(e);
         };
+        // Прямой признак: теги hh рисуются компонентом с классом
+        // magritte-tag__label. Версия в классе меняется, «tag__label» — нет.
+        // Одного тега достаточно: бывают вакансии ровно с одним навыком,
+        // и требование «хотя бы два» их молча теряло.
+        skills = [...document.querySelectorAll('[class*="tag__label"]')]
+            .filter(e => inSection(e) && (e.innerText || '').trim())
+            .map(e => e.innerText.trim())
+            .slice(0, 40);
+
+        // Запасной путь, если hh переименует компонент: самая большая
+        // группа элементов с общим классом внутри секции.
         let box = h.parentElement;
         for (let i = 0; i < 5 && box && !skills.length; i++) {
             const leaves = [...box.querySelectorAll('*')].filter(
@@ -1110,7 +1121,10 @@ def is_junk_skill(raw):
         return True
     if JUNK_SKILL_RE.search(s) or UI_SKILL_RE.search(s):
         return True
-    return len(s.split()) > 4          # навык — не предложение
+    # Считаем только значащие слова: «Английский — B2 — Средне-продвинутый»
+    # это настоящий тег hh, а тире словами быть не должны.
+    words = [w for w in s.split() if any(c.isalnum() for c in w)]
+    return len(words) > 4              # навык — не предложение
 
 
 def normalize_skill(raw):

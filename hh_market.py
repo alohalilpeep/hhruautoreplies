@@ -3,6 +3,7 @@
 
     python hh_market.py --collect        обойти выдачу и снять факты
     python hh_market.py --collect 40     ограничить числом вакансий
+    python hh_market.py --rescrape 250   пересобрать навыки новым правилом
     python hh_market.py --report         рейтинг навыков
     python hh_market.py --merge ../hh_autoreply_2/hh_responses.db
 
@@ -70,6 +71,56 @@ def collect(limit=None):
     print(f"\nснято фактов: {done}, из них с навыками: {new}")
 
 
+def rescrape(limit=None):
+    """Пересобрать навыки по вакансиям, которые уже в базе.
+
+    Прежние строки помечаются stale, а не удаляются: если новое правило
+    вернёт пусто, надо видеть, что было раньше. Отчёт считает только ok.
+    """
+    db = hh.init_db()
+    todo = [r[0] for r in db.execute(
+        "SELECT vacancy_id FROM vacancy_facts ORDER BY scraped_ts")]
+    already = {r[0] for r in db.execute(
+        "SELECT DISTINCT vacancy_id FROM vacancy_skills WHERE status='stale'")}
+    if "--all" not in sys.argv:
+        todo = [v for v in todo if v not in already]  # продолжаем с места остановки
+    print(f"вакансий в базе: {len(todo)} к пересбору")
+    if limit:
+        todo = todo[:limit]
+    ws = hh.open_profile()
+    done = with_skills = 0
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp(ws)
+        page = browser.contexts[0].new_page()
+        page.set_default_navigation_timeout(hh.NAV_TIMEOUT)
+        try:
+            for vid in todo:
+                try:
+                    page.goto(f"https://hh.ru/vacancy/{vid}",
+                              wait_until="domcontentloaded")
+                    hh.pause(1.5, 3)
+                    if hh.captcha_present(page):
+                        print("\nhh показал капчу — останавливаюсь.")
+                        break
+                    facts = hh.scrape_facts(page)
+                    # старое в архив до вставки нового
+                    db.execute("UPDATE vacancy_skills SET status='stale' "
+                               "WHERE vacancy_id=?", (vid,))
+                    hh.save_facts(db, vid, facts)
+                    n = len(facts.get("skills") or []) if facts else 0
+                    done += 1
+                    with_skills += bool(n)
+                    if done % 25 == 0:
+                        print(f"  ...{done}, с навыками {with_skills}")
+                except Exception as e:
+                    print(f"  {vid}: {type(e).__name__}")
+                    if "closed" in str(e).lower():
+                        break
+        finally:
+            page.close()
+    print(f"\nпересобрано: {done}, из них с навыками: {with_skills}")
+
+
 def merge(other_path):
     """Подтянуть факты из базы другого аккаунта. Ключ — id вакансии,
     поэтому повтор безвреден."""
@@ -132,6 +183,10 @@ def main():
         i = args.index("--collect")
         lim = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
         collect(lim)
+    elif "--rescrape" in args:
+        i = args.index("--rescrape")
+        lim = int(args[i + 1]) if len(args) > i + 1 and args[i + 1].isdigit() else None
+        rescrape(lim)
     elif "--merge" in args:
         i = args.index("--merge")
         if len(args) <= i + 1:
