@@ -946,21 +946,48 @@ def click_apply(page, btn, pages_before, tries=3):
 FACTS_JS = r"""() => {
     const q = s => { const n = document.querySelector(s);
                      return n ? n.innerText.trim() : ""; };
-    // Ключевые навыки лежат обычными div без data-qa. Находим заголовок
-    // и поднимаемся, пока в поддереве не окажется больше одного листа.
+    // Ключевые навыки лежат обычными div без data-qa, поэтому ищем их
+    // по заголовку. Раньше брали все листья поддерева — и на страницах,
+    // где блока навыков нет вовсе, возвращали первый попавшийся список
+    // из описания: «Ключевые задачи:», «Проектирование КСПД...».
+    //
+    // Теги — это список, отрендеренный одним компонентом, поэтому у всех
+    // одинаковый класс. Берём самую большую группу элементов с общим
+    // классом; нет такой группы — честно возвращаем пусто.
     let skills = [];
-    const h = [...document.querySelectorAll('h2')]
+    const h = [...document.querySelectorAll('h2, h3')]
         .find(e => /ключевые навыки/i.test(e.textContent || ''));
     if (h) {
+        // Граница секции: всё, что после следующего заголовка, уже не навыки
+        const heads = [...document.querySelectorAll('h1, h2, h3')];
+        const next = heads[heads.indexOf(h) + 1] || null;
+        const inSection = e => {
+            if (h.contains(e) || e === h) return false;
+            const after = h.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING;
+            if (!after) return false;
+            if (!next) return true;
+            return !(next.compareDocumentPosition(e) & Node.DOCUMENT_POSITION_FOLLOWING)
+                   && e !== next && !next.contains(e);
+        };
         let box = h.parentElement;
-        for (let i = 0; i < 5 && box; i++) {
-            const leaves = [...box.querySelectorAll('*')]
-                .filter(e => e.children.length === 0
-                          && (e.innerText || '').trim()
-                          && !/ключевые навыки/i.test(e.innerText));
-            if (leaves.length >= 2) {
-                skills = leaves.map(e => e.innerText.trim()).slice(0, 40);
-                break;
+        for (let i = 0; i < 5 && box && !skills.length; i++) {
+            const leaves = [...box.querySelectorAll('*')].filter(
+                e => e.children.length === 0 && (e.innerText || '').trim()
+                     && inSection(e));
+            const groups = {};
+            for (const e of leaves) {
+                // класс вместе с тегом: один компонент — один ключ
+                const cls = (e.className || '').toString().trim();
+                if (!cls) continue;          // без класса — почти всегда текст описания
+                const key = e.tagName + '|' + cls;
+                (groups[key] = groups[key] || []).push(e);
+            }
+            let best = [];
+            for (const k in groups) {
+                if (groups[k].length > best.length) best = groups[k];
+            }
+            if (best.length >= 2) {
+                skills = best.map(e => e.innerText.trim()).slice(0, 40);
             }
             box = box.parentElement;
         }
@@ -1067,11 +1094,21 @@ SKILL_ALIASES = {
 JUNK_SKILL_RE = re.compile(r"[:;]\s*$|^[\s.,;—-]+$|^(опыт|знание|умение|навык|готовность)\b", re.I)
 
 
+# Подписи интерфейса самой страницы вакансии. Старый обход доходил до низа
+# страницы и собирал кнопки формы вопросов работодателю, станцию метро и
+# ссылку на карту — короткие, без пунктуации, фильтр формы их пропускал.
+UI_SKILL_RE = re.compile(
+    r"задайте вопрос|вакансия открыта|где предстоит|где располагается"
+    r"|показать на|большой карте|другой вопрос|как с вами связаться"
+    r"|какая оплата|какой график|запросить точный|^о компании$"
+    r"|смотреть карту|^показать", re.I)
+
+
 def is_junk_skill(raw):
     s = re.sub(r"\s+", " ", raw or "").strip()
     if not s or len(s) > 40:
         return True
-    if JUNK_SKILL_RE.search(s):
+    if JUNK_SKILL_RE.search(s) or UI_SKILL_RE.search(s):
         return True
     return len(s.split()) > 4          # навык — не предложение
 
