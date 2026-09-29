@@ -35,3 +35,6 @@ backups/
 choices_today.txt
 primer.txt
 parked.json
+
+# снимки живых тестов
+tests/artifacts/

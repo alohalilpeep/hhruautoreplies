@@ -951,6 +951,12 @@ def apply_reacted(page, pages_before):
         return True                                  # вопросы работодателя
     if visible(page, SEL["popup"]):
         return True                                  # попап отклика
+    if visible(page, SEL["relocation_confirm"]):
+        # «Вы откликаетесь на вакансию в другой стране» — тоже реакция.
+        # Без этой строки клик считался несработавшим, повторялся трижды,
+        # и КАЖДАЯ зарубежная вакансия уходила в no_reaction: подтверждение
+        # мы нажать успевали, но до него уже не доходило.
+        return True
     if page.locator(SEL["already"]).count():
         return True                                  # мгновенный отклик
     if page.get_by_text(DONE_RE).count():
