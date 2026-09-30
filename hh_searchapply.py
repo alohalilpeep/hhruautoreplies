@@ -429,6 +429,13 @@ def apply_from_card(page, card, db, vid, title, company):
             return "applied"
         if attempt < 3:
             page.wait_for_timeout(2500)
+
+    # Подтверждения нет. Прежде чем записать «не знаю», проверим капчу:
+    # она всплывает и после клика, уже во время ожидания. Раньше мы этого
+    # не замечали и сжигали вакансии по восемь подряд, пока не срабатывал
+    # предохранитель, — вместо того чтобы остановиться и дождаться человека.
+    if hh.captcha_present(page):
+        raise hh.CaptchaFound()
     return "unknown"
 
 
