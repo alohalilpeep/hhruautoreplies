@@ -198,6 +198,28 @@ def confirm_relocation(page):
     return True
 
 
+def close_leftover(page):
+    """Закрыть окно, если после отправки оно осталось на экране.
+
+    hh закрывает его сам не всегда: например, когда пишет «отклик уже
+    просмотрен работодателем». Висящее окно перекрывает выдачу, и клик
+    по следующей карточке уходит в него.
+    """
+    try:
+        btn = page.locator(hh.SEL["popup_close"])
+        if btn.count() and btn.first.is_visible():
+            btn.first.click()
+            hh.pause(1, 2)
+            return True
+        if hh.visible(page, hh.SEL["popup"]):
+            page.keyboard.press("Escape")
+            hh.pause(1, 2)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def handle_popup(page, letter):
     """Разобрать попап отклика. Возвращает (статус, письмо_ушло).
 
@@ -249,6 +271,10 @@ def handle_popup(page, letter):
     hh.pause(2, 4)
     if page.get_by_text(hh.LIMIT_RE).count():
         raise hh.LimitReached()
+    # Отправили — закрываем окно крестиком. hh не всегда убирает его сам:
+    # иногда вместо подтверждения показывает «отклик уже просмотрен
+    # работодателем», и окно висит, загораживая следующую карточку.
+    close_leftover(page)
     return None, letter_sent
 
 
@@ -366,6 +392,7 @@ def apply_from_card(page, card, db, vid, title, company):
                     submit.click()
                     hh.pause(2, 3)
                     letter_sent = True
+                    close_leftover(page)
     hh.LAST_LETTER_SENT = letter_sent
 
     # Подтверждение ищем в самой карточке: на странице выдачи «вы откликнулись»
