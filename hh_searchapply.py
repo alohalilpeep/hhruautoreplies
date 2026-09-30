@@ -105,6 +105,21 @@ def snapshot(page, vid, status, title=""):
         pass            # диагностика не должна ронять прогон
 
 
+def mark_tab(page, label):
+    """Пометить вкладку, в которой идёт прогон, и вывести её вперёд.
+
+    Закрепить вкладку (Pin tab) снаружи нельзя — это кнопка самого браузера.
+    Зато можно переименовать: в полосе вкладок видно «▶ ПРОГОН hh3», и её
+    не спутать с теми, что человек открыл руками. Заголовок сбрасывается
+    при переходе, поэтому ставим заново после каждой страницы.
+    """
+    try:
+        page.bring_to_front()
+        page.evaluate("l => { document.title = l; }", f"▶ ПРОГОН {label}")
+    except Exception:
+        pass            # вкладка — удобство, а не работа
+
+
 def cards_on_page(page):
     """Карточки вакансий на странице выдачи.
 
@@ -363,6 +378,7 @@ def apply_from_card(page, card, db, vid, title, company):
         status = handle_questions(page, db, vid, url, company, letter)
         page.goto(search_url, wait_until="domcontentloaded")
         hh.pause(2, 4)
+        mark_tab(page, hh.ACCOUNT_NAME)
         return status
 
     status, letter_sent = handle_popup(page, letter)
@@ -463,6 +479,7 @@ def run(page, db, pages, url=None, home=False):
         else:
             page.goto(f"{url}{sep}page={n}", wait_until="domcontentloaded")
         hh.pause(3, 6)
+        mark_tab(page, hh.ACCOUNT_NAME)
         cards = cards_on_page(page)
         total = cards.count()
         if not total:
