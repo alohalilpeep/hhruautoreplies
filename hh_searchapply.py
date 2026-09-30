@@ -303,6 +303,12 @@ def apply_from_card(page, card, db, vid, title, company):
     if card.locator(ALREADY_IN_CARD).count():
         return "already"
 
+    # Чужое окно, оставшееся от предыдущей вакансии, накрывает всю выдачу,
+    # и клик уходит в него, а не в карточку. Так один медленно открывшийся
+    # попап портил всю страницу: восемь промахов подряд из пятнадцати.
+    if close_leftover(page):
+        print("    закрыл окно от предыдущей вакансии")
+
     btn = card.locator(RESPONSE_IN_CARD).first
     if not btn.count() or not btn.is_visible():
         # Кнопки нет по двум разным причинам, и путать их нельзя: либо на
@@ -332,6 +338,9 @@ def apply_from_card(page, card, db, vid, title, company):
     if not hh.click_apply(page, btn, pages_before):
         if hh.captcha_present(page):
             raise hh.CaptchaFound()
+        # Попап мог всплыть уже после того, как мы перестали ждать.
+        # Не закроем — он накроет следующие карточки.
+        close_leftover(page)
         return "no_reaction"
 
     # отклик на сайте работодателя: открылась новая вкладка
