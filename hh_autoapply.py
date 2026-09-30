@@ -48,6 +48,14 @@ DAILY_LIMIT = int(os.getenv("DAILY_LIMIT", "50"))     # свой лимит от
 UNKNOWN_STREAK = int(os.getenv("UNKNOWN_STREAK", "8"))
 # Таймаут навигации, мс. Дефолт playwright — 30 секунд, для прокси мало.
 NAV_TIMEOUT = int(os.getenv("NAV_TIMEOUT", "90000"))
+# Сколько секунд ждать, пока человек пройдёт капчу, прежде чем сдаться.
+# Ноль — не ждать вовсе, останавливаться сразу, как было раньше.
+CAPTCHA_WAIT = float(os.getenv("CAPTCHA_WAIT", "1800"))
+# Сколько секунд ждать реакции на «Откликнуться». Пяти не хватало:
+# попап отклика рисуется дольше, скрипт считал клик неудачным, жал
+# повторно — и закрывал уже открывшийся попап. Проверено вживую:
+# при ожидании до двадцати секунд та же вакансия отправляется.
+REACT_WAIT = float(os.getenv("REACT_WAIT", "20"))
 RESUME_TITLE = os.getenv("RESUME_TITLE", "")          # часть названия резюме, если их несколько
 # Версия резюме. Штампуется на каждый отклик, чтобы потом сравнивать
 # конверсию разных редакций: поменял резюме — подними версию в .env.
@@ -278,7 +286,10 @@ SEL = {
     "letter_input": '[data-qa="vacancy-response-popup-form-letter-input"]',
     # письмо после мгновенного отклика: hh показывает кнопку прямо на вакансии,
     # по ней открывается та же форма письма, что и в попапе
-    "letter_after_toggle": '[data-qa="responded-success-attach-cover-letter"]',
+    # В выдаче кнопка называется иначе, чем на странице вакансии: там
+    # responded-success-attach-cover-letter, здесь — vacancy-response-letter-toggle.
+    "letter_after_toggle": ('[data-qa="responded-success-attach-cover-letter"], '
+                            '[data-qa="vacancy-response-letter-toggle"]'),
     "letter_after_input": '[data-qa="vacancy-response-popup-form-letter-input"]',
     "letter_after_submit": '[data-qa="vacancy-response-letter-submit"]',
     "login_link": '[data-qa="login"]',
@@ -485,6 +496,39 @@ def captcha_present(page):
         return bool(visible_text(page, CAPTCHA_RE))
     except Exception:
         return False
+
+
+def wait_captcha(page, limit=None):
+    """Дождаться, пока капчу пройдёт человек.
+
+    Раньше прогон на этом месте заканчивался, и всё приходилось поднимать
+    заново. Решать капчу за человека мы не будем — она ровно для того и
+    стоит, — но ждать его можем: окно браузера открыто, он жмёт, мы идём
+    дальше с того же места.
+
+    Возвращает True, если капча исчезла, False — если не дождались.
+    """
+    limit = CAPTCHA_WAIT if limit is None else limit
+    if limit <= 0:
+        return False
+    print(f"\nhh показал капчу. Пройди её в окне браузера — жду до "
+          f"{int(limit // 60)} мин, потом остановлюсь.")
+    waited = 0
+    while waited < limit:
+        page.wait_for_timeout(10000)
+        waited += 10
+        try:
+            gone = not captcha_present(page)
+        except Exception:
+            return False                      # браузер закрыли — ждать нечего
+        if gone:
+            print(f"капча пройдена (ждал {waited // 60} мин {waited % 60} с), "
+                  f"продолжаю")
+            return True
+        if waited % 300 == 0:
+            print(f"    всё ещё жду, прошло {waited // 60} мин")
+    print("капчу так и не прошли — останавливаюсь, вакансии не потеряны")
+    return False
 
 
 def letter_required(page):
@@ -978,7 +1022,7 @@ def click_apply(page, btn, pages_before, tries=3):
             btn.click()
         except Exception:
             return False
-        for _ in range(10):                          # до ~5 секунд на реакцию
+        for _ in range(int(REACT_WAIT * 2)):         # шаг по полсекунды
             page.wait_for_timeout(500)
             if apply_reacted(page, pages_before):
                 pause(1, 2)                          # дать попапу дорисоваться
@@ -1450,13 +1494,10 @@ def main():
                     break
                 except CaptchaFound:
                     # Капча означает, что hh считает поведение автоматическим.
-                    # Продолжать нельзя: дальше отклики всё равно не проходят,
-                    # а настойчивость приближает блокировку аккаунта.
-                    print(f"\nhh показал капчу — останавливаюсь.\n"
-                          f"Открой профиль, пройди капчу руками и запусти "
-                          f"снова. Вакансии не потеряны.\n"
-                          f"Если капча появляется часто, снизь DAILY_LIMIT "
-                          f"и увеличь паузы между откликами.")
+                    # Дальше отклики всё равно не проходят, поэтому ждём
+                    # человека: пройдёт — идём дальше, нет — заканчиваем.
+                    if wait_captcha(page):
+                        continue
                     break
                 except Exception as e:
                     # Профиль BitBrowser закрылся — чаще всего мак ушёл в сон.

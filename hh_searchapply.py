@@ -289,9 +289,36 @@ def apply_from_card(page, card, db, vid, title, company):
         return status
 
     status, letter_sent = handle_popup(page, letter)
-    hh.LAST_LETTER_SENT = letter_sent
     if status:
+        hh.LAST_LETTER_SENT = letter_sent
         return status
+
+    # Отклик ушёл мгновенно, без попапа. Письмо работодатель не требовал,
+    # но hh предлагает приложить его следом — ссылкой «Приложить письмо».
+    # В обычном прогоне эта ветка есть, в выдаче я её сперва не перенёс,
+    # и при мгновенном отклике письмо не уходило никогда.
+    if hh.LETTER_MODE == "always" and not letter_sent:
+        # Ссылку ищем ВНУТРИ своей карточки. На странице полсотни карточек,
+        # и поиск по всей странице цеплял первую попавшуюся — письмо могло
+        # уехать к чужой вакансии, а к своей не уйти вовсе.
+        toggle = card.locator(hh.SEL["letter_after_toggle"]).first
+        if toggle.count() and toggle.is_visible():
+            toggle.click()
+            hh.pause(1, 2)
+            area = card.locator(hh.SEL["letter_after_input"]).first
+            if not area.count():                 # форма письма может всплыть
+                area = page.locator(hh.SEL["letter_after_input"]).first
+            if area.count() and area.is_visible():
+                area.fill(letter)
+                hh.pause(1, 2)
+                submit = card.locator(hh.SEL["letter_after_submit"]).first
+                if not submit.count():
+                    submit = page.locator(hh.SEL["letter_after_submit"]).first
+                if submit.count():
+                    submit.click()
+                    hh.pause(2, 3)
+                    letter_sent = True
+    hh.LAST_LETTER_SENT = letter_sent
 
     # Подтверждение ищем в самой карточке: на странице выдачи «вы откликнулись»
     # появляется именно там, а не на всю страницу, как на карточке вакансии.
@@ -406,8 +433,10 @@ def run(page, db, pages, url=None, home=False):
                 print("hh пишет, что лимит откликов исчерпан")
                 return
             except hh.CaptchaFound:
-                print("\nhh показал капчу — останавливаюсь.\n"
-                      "Пройди её руками и запусти снова. Вакансии не потеряны.")
+                # Ждём человека, а не падаем. Вакансию не записываем —
+                # вернётся в этот же прогон следующим кругом или в следующий.
+                if hh.wait_captcha(page):
+                    continue
                 return
             except Exception as e:
                 if "has been closed" in str(e) or "Target closed" in str(e):
