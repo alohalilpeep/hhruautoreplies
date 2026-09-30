@@ -14,6 +14,7 @@ import datetime as dt
 from pathlib import Path
 
 import requests
+import hh_human as human
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
@@ -1019,7 +1020,7 @@ def click_apply(page, btn, pages_before, tries=3):
     """
     for attempt in range(tries):
         try:
-            btn.click()
+            human.click(btn)          # не строго в центр кнопки
         except Exception:
             return False
         for _ in range(int(REACT_WAIT * 2)):         # шаг по полсекунды

@@ -41,6 +41,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).parent))
 import hh_autoapply as hh
+import hh_human as human
 
 # Карточка вакансии в выдаче. Селектор точный, а не по префиксу: внутри
 # карточки десяток элементов с data-qa, начинающимся так же
@@ -372,7 +373,7 @@ def apply_from_card(page, card, db, vid, title, company):
     # тому, чего не видно, Playwright считает ошибкой, а не промахом.
     try:
         btn.scroll_into_view_if_needed()
-        hh.pause(0.5, 1.5)
+        human.settle(page)
     except Exception:
         pass
 
@@ -591,7 +592,10 @@ def run(page, db, pages, url=None, home=False):
                 print(f"\n{hh.UNKNOWN_STREAK} откликов подряд без подтверждения. "
                       f"Останавливаюсь, вакансии не потеряны.")
                 return
-            hh.pause(20, 60) if status in ("applied", "answered") else hh.pause(4, 10)
+            if status in ("applied", "answered"):
+                human.after_apply()
+            else:
+                human.between()
 
     print(f"\nпросмотрено новых карточек: {seen}")
 
