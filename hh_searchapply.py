@@ -74,6 +74,37 @@ IN_CARD = {
 }
 
 
+# Статусы, на которых что-то пошло не так и хочется увидеть страницу глазами.
+# Снимок и текст ложатся в tests/artifacts/ — там же, где артефакты живого
+# теста. Каталог в .gitignore, в репозиторий ничего не уедет.
+SNAP_STATUSES = {"no_reaction", "unknown", "error", "no_button"}
+ART = Path(__file__).resolve().parent / "tests" / "artifacts"
+
+
+def snapshot(page, vid, status, title=""):
+    """Сохранить, как выглядела страница в момент заминки.
+
+    Без этого причина сбоя остаётся догадкой: в логе только статус, а что
+    показывал hh — неизвестно. Так вскрылись и окно про другую страну,
+    и попап, который не успевал открыться.
+    """
+    try:
+        ART.mkdir(parents=True, exist_ok=True)
+        stamp = hh.dt.datetime.now().strftime("%H%M%S")
+        base = ART / f"{stamp}_{status}_{vid}"
+        page.screenshot(path=str(base.with_suffix(".png")))
+        body = ""
+        try:
+            body = page.inner_text("body")[:20000]
+        except Exception:
+            pass
+        base.with_suffix(".txt").write_text(
+            f"вакансия: {title}\nid: {vid}\nстатус: {status}\n"
+            f"адрес: {page.url}\n\n{body}", encoding="utf-8")
+    except Exception:
+        pass            # диагностика не должна ронять прогон
+
+
 def cards_on_page(page):
     """Карточки вакансий на странице выдачи.
 
@@ -462,6 +493,8 @@ def run(page, db, pages, url=None, home=False):
                 status = "error"
                 print(f"Ошибка на вакансии {vid}: {e}")
 
+            if status in SNAP_STATUSES:
+                snapshot(page, vid, status, title)
             unknown_row = unknown_row + 1 if status == "unknown" else 0
             hh.save(db, vid, f"https://hh.ru/vacancy/{vid}", title, company,
                     status, hh.LAST_LETTER_SENT)
