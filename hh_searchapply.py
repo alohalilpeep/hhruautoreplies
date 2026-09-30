@@ -53,6 +53,10 @@ ALREADY_IN_CARD = '[data-qa*="view-topic"]'
 # Подтверждение отклика на вакансию в другом городе или стране. Подпись
 # кнопки у hh разная, поэтому ищем по смыслу, а не по точному тексту.
 RELOC_RE = re.compile(r"всё равно|все равно|подтвердить", re.I)
+
+# «Отклик уже просмотрен работодателем» — письмо прикладывать поздно,
+# hh его не примет, а форма остаётся висеть и держит прогон.
+VIEWED_RE = re.compile(r"отклик уже просмотрен", re.I)
 # «откликнуться» сюда класть нельзя: так подписаны кнопки в самих
 # карточках, и подтверждение утащило бы клик в случайную вакансию.
 
@@ -172,6 +176,13 @@ def handle_popup(page, letter):
     submit = page.locator(hh.SEL["popup_submit"])
     if not submit.count():
         return None, False
+
+    # На этот отклик работодатель уже посмотрел: отправлять нечего,
+    # а попап сам не закроется и застопорит прогон.
+    if page.get_by_text(VIEWED_RE).count():
+        print("    отклик уже просмотрен работодателем — закрываю")
+        hh.close_popup(page)
+        return "already", False
 
     if hh.RESUME_TITLE:
         scope = (page.locator(hh.SEL["popup"])
@@ -305,6 +316,12 @@ def apply_from_card(page, card, db, vid, title, company):
         if toggle.count() and toggle.is_visible():
             toggle.click()
             hh.pause(1, 2)
+            if (card.get_by_text(VIEWED_RE).count()
+                    or page.get_by_text(VIEWED_RE).count()):
+                print("    отклик уже просмотрен — письмо прикладывать поздно")
+                hh.close_popup(page)
+                hh.LAST_LETTER_SENT = False
+                return "applied"
             area = card.locator(hh.SEL["letter_after_input"]).first
             if not area.count():                 # форма письма может всплыть
                 area = page.locator(hh.SEL["letter_after_input"]).first
