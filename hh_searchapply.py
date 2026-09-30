@@ -213,26 +213,52 @@ def confirm_relocation(page):
     return True
 
 
-def close_leftover(page):
-    """Закрыть окно, если после отправки оно осталось на экране.
+# Всё, что hh умеет положить поверх выдачи: окно отклика, диалог
+# подтверждения и чат с работодателем — он открывается сам сразу после
+# отклика. Любое из них перекрывает карточки, и клик уходит в него.
+OVERLAYS = (
+    '[data-qa="bottom-sheet-content"]',
+    '[role="dialog"]',
+    '[data-qa*="chatik"]',
+    '[class*="chatik-container"]',
+    '[data-qa*="chat-window"]',
+)
+CLOSE_BUTTONS = (
+    '[data-qa="response-popup-close"]',
+    '[data-qa*="close"]',
+    'button[aria-label*="акрыть"]',
+)
 
-    hh закрывает его сам не всегда: например, когда пишет «отклик уже
-    просмотрен работодателем». Висящее окно перекрывает выдачу, и клик
-    по следующей карточке уходит в него.
+
+def close_leftover(page):
+    """Убрать с экрана всё, что перекрывает выдачу.
+
+    hh закрывает такие окна сам не всегда: например, когда пишет «отклик
+    уже просмотрен работодателем», а после части откликов ещё и сразу
+    открывает чат с работодателем. Висящее поверх окно перекрывает
+    карточки, и следующий клик попадает в него, а не в кнопку отклика.
     """
+    closed = False
     try:
-        btn = page.locator(hh.SEL["popup_close"])
-        if btn.count() and btn.first.is_visible():
-            btn.first.click()
-            hh.pause(1, 2)
-            return True
-        if hh.visible(page, hh.SEL["popup"]):
-            page.keyboard.press("Escape")
-            hh.pause(1, 2)
-            return True
+        for sel in OVERLAYS:
+            box = page.locator(sel).first
+            if not box.count() or not box.is_visible():
+                continue
+            hit = False
+            for c in CLOSE_BUTTONS:
+                btn = box.locator(c).first
+                if btn.count() and btn.is_visible():
+                    btn.click()
+                    hh.pause(1, 2)
+                    hit = closed = True
+                    break
+            if not hit:                       # крестика нет — пробуем Escape
+                page.keyboard.press("Escape")
+                hh.pause(1, 2)
+                closed = True
     except Exception:
         pass
-    return False
+    return closed
 
 
 def handle_popup(page, letter):
