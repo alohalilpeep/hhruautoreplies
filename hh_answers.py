@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hh_autoapply import (init_db, normalize_question, classify_question,
                           ACCOUNT_NAME)
 import hh_choices
+import hh_profile
 
 EDIT_FILE = Path(__file__).with_name("answers_edit.txt")
 SEP = "-" * 3
@@ -180,7 +181,8 @@ def export(db, path=EDIT_FILE, statuses=None):
     exported = "\n".join(
         "# EXPORTED: " + " ".join(ids[i:i + 8]) for i in range(0, len(ids), 8))
 
-    chunks = [HEADER + exported + "\n"]
+    about = hh_profile.render()
+    chunks = [HEADER + exported + "\n" + (("\n" + about + "\n") if about else "")]
     for qnorm, question, answer, status in rows:
         flat = re.sub(r"\s+", " ", (question or "").replace("\xa0", " ")).strip()
         wrapped = textwrap.fill(flat, width=96, subsequent_indent="        ")

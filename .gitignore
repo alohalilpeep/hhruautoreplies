@@ -38,3 +38,6 @@ parked.json
 
 # снимки живых тестов
 tests/artifacts/
+
+# личные данные: имя, контакты, дата рождения
+profile.txt
