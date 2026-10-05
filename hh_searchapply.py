@@ -278,6 +278,39 @@ def close_leftover(page):
     return closed
 
 
+def list_visible(page):
+    """Видна ли снова выдача, то есть можно ли кликать по карточкам."""
+    try:
+        first = page.locator(CARD).first
+        return bool(first.count()) and first.is_visible()
+    except Exception:
+        return False
+
+
+def clear_overlays(page, tries=6):
+    """Закрывать всё, что всплыло, пока выдача не покажется снова.
+
+    После отклика hh нередко открывает не одно окно, а несколько подряд:
+    подтверждение, следом чат с работодателем, иногда предложение усилить
+    отклик. Закрыть одно мало — поверх остаётся следующее, и клик по
+    карточке уходит в него. Поэтому закрываем по кругу, пока есть что
+    закрывать, и останавливаемся, когда список вакансий снова виден.
+
+    Возвращает число закрытых окон.
+    """
+    closed = 0
+    for _ in range(tries):
+        if not close_leftover(page):
+            break                      # закрывать больше нечего
+        closed += 1
+        if list_visible(page):
+            break                      # выдача вернулась, дальше не трогаем
+    if closed:
+        print(f"    закрыл окон: {closed}"
+              f"{'' if list_visible(page) else ', выдача всё ещё перекрыта'}")
+    return closed
+
+
 def handle_popup(page, letter):
     """Разобрать попап отклика. Возвращает (статус, письмо_ушло).
 
@@ -370,8 +403,7 @@ def apply_from_card(page, card, db, vid, title, company):
     # Чужое окно, оставшееся от предыдущей вакансии, накрывает всю выдачу,
     # и клик уходит в него, а не в карточку. Так один медленно открывшийся
     # попап портил всю страницу: восемь промахов подряд из пятнадцати.
-    if close_leftover(page):
-        print("    закрыл окно от предыдущей вакансии")
+    clear_overlays(page)
 
     btn = card.locator(RESPONSE_IN_CARD).first
     if not btn.count() or not btn.is_visible():
@@ -601,6 +633,11 @@ def run(page, db, pages, url=None, home=False):
                 status = "error"
                 print(f"Ошибка на вакансии {vid}: {e}")
 
+            if status in ("applied", "answered"):
+                # hh любит открыть следом чат или предложение «усилить
+                # отклик» — убираем всё до того, как возьмёмся за
+                # следующую карточку.
+                clear_overlays(page)
             if status in SNAP_STATUSES:
                 snapshot(page, vid, status, title)
             unknown_row = unknown_row + 1 if status == "unknown" else 0
