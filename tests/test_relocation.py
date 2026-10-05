@@ -25,7 +25,7 @@ class Element:
     def __init__(self, name, page):
         self.name, self.page = name, page
 
-    def click(self):
+    def click(self, **kw):          # настоящий click принимает timeout и position
         self.page.clicked.append(self.name)
 
 
@@ -108,15 +108,14 @@ def test_слово_откликнуться_не_считается_подтв�
 def test_сбой_клика_не_роняет_прогон():
     page = FakePage({CONFIRM: ["Подтвердить"]})
 
-    def explode():
+    def explode(**kw):
         raise RuntimeError("element is not attached")
 
-    page.locator(CONFIRM).first.click = explode
-    Element.click = lambda self: explode()
+    Element.click = explode
     try:
         assert sa.confirm_relocation(page) is False
     finally:
-        Element.click = lambda self: self.page.clicked.append(self.name)
+        Element.click = lambda self, **kw: self.page.clicked.append(self.name)
 
 
 # --- реакция на клик -------------------------------------------------------

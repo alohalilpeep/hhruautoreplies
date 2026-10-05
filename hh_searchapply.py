@@ -206,9 +206,7 @@ def confirm_relocation(page):
         reloc = dialog.get_by_role("button", name=RELOC_RE)
     if not reloc.count():
         return False
-    try:
-        reloc.first.click()
-    except Exception:
+    if not try_click(reloc.first, "подтверждение другой страны"):
         return False
     hh.pause(1, 2)
     return True
@@ -229,6 +227,24 @@ CLOSE_BUTTONS = (
     '[data-qa*="close"]',
     'button[aria-label*="акрыть"]',
 )
+
+
+# Сколько ждать, что по элементу вообще можно кликнуть. По умолчанию
+# Playwright ждёт тридцать секунд, и каждая перекрытая кнопка стоила
+# полминуты и целой вакансии: исключение уходило наверх и писало error.
+CLICK_TIMEOUT = 10000
+
+
+def try_click(el, what=""):
+    """Кликнуть и честно сказать, вышло ли. Таймаут короткий: если элемент
+    перекрыт, лучше быстро вернуться и разобрать перекрытие, чем ждать."""
+    try:
+        el.click(timeout=CLICK_TIMEOUT)
+        return True
+    except Exception:
+        if what:
+            print(f"    не удалось нажать: {what}")
+        return False
 
 
 def close_leftover(page):
@@ -284,7 +300,7 @@ def handle_popup(page, letter):
                  if page.locator(hh.SEL["popup"]).count() else page)
         found = scope.get_by_text(hh.RESUME_TITLE, exact=False)
         if found.count():
-            found.first.click()
+            try_click(found.first, "выбор резюме")
             hh.pause(0.5, 1.5)
 
     # резюме скрыто от работодателей: отклик не примут, ничего не жмём
@@ -301,7 +317,7 @@ def handle_popup(page, letter):
     if need_letter or hh.LETTER_MODE == "always":
         toggle = page.locator(hh.SEL["letter_toggle"])
         if toggle.count():
-            toggle.first.click()
+            try_click(toggle.first, "переключатель письма")
             hh.pause(0.5, 1.5)
         area = page.locator(hh.SEL["letter_input"])
         if area.count():
@@ -309,7 +325,13 @@ def handle_popup(page, letter):
             letter_sent = True
             hh.pause(1, 2)
 
-    submit.first.click()
+    if not try_click(submit.first, "отправку отклика"):
+        # Кнопка есть, но нажать не вышло: что-то поверх неё. Убираем
+        # перекрытие и пробуем ещё раз, иначе вакансия сгорит в error.
+        close_leftover(page)
+        if not try_click(submit.first, "отправку отклика (повтор)"):
+            close_leftover(page)
+            return "no_reaction", False
     hh.pause(2, 4)
     if page.get_by_text(hh.LIMIT_RE).count():
         raise hh.LimitReached()
@@ -422,8 +444,8 @@ def apply_from_card(page, card, db, vid, title, company):
         # и поиск по всей странице цеплял первую попавшуюся — письмо могло
         # уехать к чужой вакансии, а к своей не уйти вовсе.
         toggle = card.locator(hh.SEL["letter_after_toggle"]).first
-        if toggle.count() and toggle.is_visible():
-            toggle.click()
+        if toggle.count() and toggle.is_visible() and try_click(
+                toggle, "приложить письмо"):
             hh.pause(1, 2)
             if (card.get_by_text(VIEWED_RE).count()
                     or page.get_by_text(VIEWED_RE).count()):
@@ -440,8 +462,7 @@ def apply_from_card(page, card, db, vid, title, company):
                 submit = card.locator(hh.SEL["letter_after_submit"]).first
                 if not submit.count():
                     submit = page.locator(hh.SEL["letter_after_submit"]).first
-                if submit.count():
-                    submit.click()
+                if submit.count() and try_click(submit, "отправку письма"):
                     hh.pause(2, 3)
                     letter_sent = True
                     close_leftover(page)
