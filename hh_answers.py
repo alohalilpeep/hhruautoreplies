@@ -12,7 +12,9 @@
   4. --approve помечает ответы готовыми. Отправляются ТОЛЬКО approved:
      пока ответ в статусе draft, вакансия просто откладывается.
 
-    venv/bin/python hh_answers.py --new         НОВЫЕ вопросы в файл с датой
+    venv/bin/python hh_answers.py --new         НОВЫЕ вопросы в questions/new/
+    venv/bin/python hh_answers.py --check F [--against SRC]
+                                                проверить файл перед --import
     venv/bin/python hh_answers.py --fill        завести строки под новые вопросы
     venv/bin/python hh_answers.py --export      выгрузить в answers_edit.txt
     venv/bin/python hh_answers.py --import      вернуть правки из txt в базу
@@ -23,7 +25,9 @@
     venv/bin/python hh_answers.py --purge "X"   заблокировать и вычистить её вопросы
     venv/bin/python hh_answers.py               сводка
 
-Обычный цикл: --new → правишь файл → --import <файл>
+Обычный цикл: --new → questions/new/<файл> → заполненная копия (агент
+hh-answerer или руками) в questions/answered/<файл> → --check → --import.
+Исходник в new/ не правится, чтобы было видно, что спросили и что ответили.
 Имя файла: ДАТА_ВРЕМЯ_АККАУНТ.txt, чтобы при нескольких аккаунтах
 не перепутать, чьи вопросы правишь.
 
@@ -45,6 +49,8 @@ import hh_choices
 import hh_profile
 
 EDIT_FILE = Path(__file__).with_name("answers_edit.txt")
+QUESTIONS_NEW = Path(__file__).with_name("questions") / "new"
+QUESTIONS_ANSWERED = Path(__file__).with_name("questions") / "answered"
 SEP = "-" * 3
 
 PART1 = """
@@ -476,22 +482,117 @@ def export_new(db):
     """
     fill(db)
     stamp = dt.datetime.now().strftime("%Y-%m-%d_%H-%M")
-    path = Path(__file__).with_name(f"{stamp}_{ACCOUNT_NAME}.txt")
+    # Выгрузка ложится в questions/new/ и там остаётся нетронутой: агент
+    # hh-answerer пишет заполненную копию в questions/answered/ под тем же
+    # именем. Так всегда видно, что спросили, а что ответили.
+    QUESTIONS_NEW.mkdir(parents=True, exist_ok=True)
+    QUESTIONS_ANSWERED.mkdir(parents=True, exist_ok=True)
+    path = QUESTIONS_NEW / f"{stamp}_{ACCOUNT_NAME}.txt"
     export(db, path, statuses=("draft", "needs_input"))
     left = db.execute(
         "SELECT COUNT(*) FROM answer_bank WHERE status IN ('draft','needs_input')"
     ).fetchone()[0]
     if left:
-        print(f"\nправь и возвращай:  venv/bin/python hh_answers.py "
-              f"--import {path.name}")
+        print(f"\nзаполни (агентом или руками) в questions/answered/{path.name}"
+              f"\nи возвращай:  venv/bin/python hh_answers.py "
+              f"--import questions/answered/{path.name}")
     else:
         print("\nновых вопросов нет, править нечего")
     return path
 
 
+def _blocks(text):
+    """Блоки файла по ключу: ('ID', x) для текста, ('КЛЮЧ', x) для выбора.
+    Значение — поля блока; ответ под «ОТВЕТ:» лежит в поле ОТВЕТ."""
+    out = {}
+    for block in re.split(rf"^{SEP}\s*$", text, flags=re.M):
+        fields, answer, in_answer = {}, [], False
+        for line in block.splitlines():
+            if in_answer:
+                if not line.lstrip().startswith("#"):
+                    answer.append(line)
+                continue
+            if line.strip() == "ОТВЕТ:":
+                in_answer = True
+                continue
+            m = re.match(r"^(ID|КЛЮЧ|СТАТУС|КОМПАНИЯ|ТИП|ВОПРОС|ВАРИАНТЫ|ВЫБОР):"
+                         r"\s*(.*)$", line)
+            if m:
+                fields[m.group(1)] = m.group(2).strip()
+        fields["ОТВЕТ"] = "\n".join(answer).strip()
+        for kind in ("ID", "КЛЮЧ"):
+            if fields.get(kind):
+                out[(kind, fields[kind])] = fields
+    return out
+
+
+def check(path, against=None):
+    """Проверить заполненный файл до --import. Возвращает число ошибок.
+
+    Нужна прежде всего после агента: удалённый блок при импорте становится
+    skip навсегда, а вариант не из списка молча не применится. Поэтому
+    с --against сверяется с исходной выгрузкой: все блоки на месте,
+    вопросы и варианты не тронуты.
+    """
+    got = _blocks(Path(path).read_text(encoding="utf-8"))
+    errors, warn = [], []
+    for (kind, ident), f in got.items():
+        q = f.get("ВОПРОС", "")[:60]
+        raw = f.get("СТАТУС", "")
+        status = _parse_status(raw)
+        if status is None:
+            errors.append(f"{ident}: статус «{raw}» не из approved/draft/"
+                          f"needs_input/skip — {q}")
+            continue
+        if kind == "ID":
+            if status == "approved" and not f["ОТВЕТ"]:
+                errors.append(f"{ident}: approved с пустым ответом — {q}")
+            continue
+        pick = f.get("ВЫБОР", "")
+        valid = [x.strip() for x in f.get("ВАРИАНТЫ", "").split("|")]
+        bad = [x.strip() for x in pick.split("|") if pick and x.strip() not in valid]
+        if bad:
+            errors.append(f"{ident}: вариант не из списка «{bad[0][:30]}» — {q}")
+        elif status == "approved" and not pick:
+            errors.append(f"{ident}: approved с пустым выбором — {q}")
+        elif "radio" in f.get("ТИП", "") and len(pick.split("|")) > 1:
+            errors.append(f"{ident}: у радиокнопки выбрано несколько — {q}")
+
+    if against:
+        src = _blocks(Path(against).read_text(encoding="utf-8"))
+        for key in src.keys() - got.keys():
+            errors.append(f"{key[1]}: блок пропал — при импорте станет skip — "
+                          f"{src[key].get('ВОПРОС', '')[:60]}")
+        for key in got.keys() - src.keys():
+            errors.append(f"{key[1]}: блока не было в исходной выгрузке")
+        for key in got.keys() & src.keys():
+            for field in ("ВОПРОС", "КОМПАНИЯ", "ТИП", "ВАРИАНТЫ"):
+                if got[key].get(field, "") != src[key].get(field, ""):
+                    errors.append(f"{key[1]}: изменена строка {field}")
+
+    counts = {}
+    for f in got.values():
+        s = _parse_status(f.get("СТАТУС")) or "?"
+        counts[s] = counts.get(s, 0) + 1
+    print(f"{Path(path).name}: блоков {len(got)}, статусы {counts}")
+    for e in errors:
+        print(f"  ✗ {e}")
+    print("  ок, можно --import" if not errors else f"  ошибок: {len(errors)}")
+    return len(errors)
+
+
 def main():
-    db = init_db()
     args = sys.argv[1:]
+    if "--check" in args:       # база не нужна: проверяется только файл
+        files = [a for a in args if a.endswith(".txt")]
+        against = None
+        if "--against" in args:
+            against = args[args.index("--against") + 1]
+            files.remove(against)
+        if not files:
+            raise SystemExit("--check <файл> [--against <исходная выгрузка>]")
+        raise SystemExit(1 if check(files[0], against) else 0)
+    db = init_db()
     if "--purge" in args:
         i = args.index("--purge")
         purge_company(db, " ".join(args[i + 1:]))
