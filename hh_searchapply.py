@@ -27,6 +27,11 @@ hh.ru/vacancy/<id> по прямой ссылке — двести раз под
     venv/bin/python hh_searchapply.py --foryou   подборка «Для вас» страницей поиска
     venv/bin/python hh_searchapply.py --main     то же, но прямо с главной страницы
     venv/bin/python hh_searchapply.py --pages 3  только первые 3 страницы
+    venv/bin/python hh_searchapply.py --deferred только добрать отложенные из базы
+
+После обхода выдачи прогон сам добирает из базы отложенные вакансии
+(questions), на все вопросы которых теперь есть ответы. Отключить —
+ключом --no-deferred.
 
 «Для вас» — это рекомендации самого hh по резюме и истории просмотров.
 Источник отдельный от нашего запроса: туда попадает то, что под наши
@@ -658,6 +663,82 @@ def run(page, db, pages, url=None, home=False):
     print(f"\nпросмотрено новых карточек: {seen}")
 
 
+def answerable_deferred(db):
+    """Отложенные вакансии, на все вопросы которых теперь есть ответы.
+
+    Вакансия с анкетой, на которую нечем ответить, не отправляется, а
+    ложится в базу со статусом questions. Когда человек дописывает ответы,
+    она разблокирована — но сама никуда не уходит: прогон из выдачи
+    увидит её, только если она снова попадётся на странице, а выдача
+    меняется каждый день. Поэтому добираем такие вакансии из базы.
+    """
+    bank = {qn: (st, cst, opts, (ch or "").strip()) for qn, st, cst, opts, ch in db.execute(
+        "SELECT qnorm, status, choice_status, options, choice FROM answer_bank")}
+    out = []
+    for vid, url in db.execute(
+            "SELECT id, url FROM responses WHERE status='questions' AND url IS NOT NULL"):
+        qs = [q for q, in db.execute(
+            "SELECT question FROM questions WHERE vacancy_id=?", (vid,))]
+        if not qs:
+            continue
+        ok = True
+        for q in qs:
+            st, cst, opts, ch = bank.get(hh.normalize_question(q), (None, None, "", ""))
+            if st == "skip" or cst == "skip":
+                ok = False                     # человек решил такие обходить
+                break
+            if opts and cst == "approved" and ch:
+                continue                       # отвечаем кликом по варианту
+            if st != "approved":
+                ok = False
+                break
+        if ok:
+            out.append((vid, url))
+    return out
+
+
+def run_deferred(page, db):
+    """Добрать из базы отложенные вакансии, которые теперь можно отправить.
+
+    Тут без выдачи: открываем вакансию по сохранённой ссылке и проходим
+    обычный путь отклика с анкетой. Прямых заходов немного — десятки, а не
+    сотни, — поэтому это не то же самое, что старый прогон по прямым ссылкам.
+    """
+    todo = answerable_deferred(db)
+    if not todo:
+        return
+    print(f"\n— добираю отложенные из базы: {len(todo)}")
+    for vid, url in todo:
+        if hh.applied_today(db) >= hh.DAILY_LIMIT:
+            print("Свой дневной лимит достигнут")
+            return
+        if hh.captcha_present(page) and not hh.wait_captcha(page):
+            return
+        hh.LAST_LETTER_SENT = False
+        try:
+            status, title, company = hh.apply(page, url, db)
+        except hh.LimitReached:
+            print("hh пишет, что лимит откликов исчерпан")
+            return
+        except hh.CaptchaFound:
+            if hh.wait_captcha(page):
+                continue
+            return
+        except Exception as e:
+            if "has been closed" in str(e) or "Target closed" in str(e):
+                print("\nБраузер закрылся. Останавливаюсь.")
+                return
+            status, title, company = "error", "", ""
+            print(f"Ошибка на вакансии {vid}: {e}")
+        hh.save(db, vid, url, title, company, status, hh.LAST_LETTER_SENT)
+        mark = " +письмо" if hh.LAST_LETTER_SENT else ""
+        print(f"[{status}{mark}] {title} | {company}  (из отложенных)")
+        if status in ("applied", "answered"):
+            human.after_apply()
+        else:
+            human.between()
+
+
 def main():
     if not hh.PROFILE_ID:
         raise SystemExit("Не задан PROFILE_ID в .env")
@@ -694,7 +775,10 @@ def main():
                     print("Не нашёл подборку «Для вас» на главной")
                     return
                 print(f"подборка «Для вас»: {url}")
-            run(page, db, pages, url, home=home)
+            if "--deferred" not in sys.argv:
+                run(page, db, pages, url, home=home)
+            if "--no-deferred" not in sys.argv:
+                run_deferred(page, db)
             print(f"За сегодня откликов: {hh.applied_today(db)}")
     finally:
         hh.close_profile()
