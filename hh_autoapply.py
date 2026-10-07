@@ -563,6 +563,29 @@ def _headers():
     return {"x-api-key": BIT_API_KEY} if BIT_API_KEY else {}
 
 
+def fresh_page(ctx):
+    """Открыть чистую вкладку, а все прочие в профиле закрыть.
+
+    Вкладки копятся от прогона к прогону: всплывашки hh, ручные заходы,
+    недозакрытые карточки. Десяток живых страниц hh съедает гигабайты
+    памяти. Новая открывается первой, чтобы окно не закрылось вместе с
+    последней вкладкой.
+    """
+    page = ctx.new_page()
+    closed = 0
+    for old in ctx.pages:
+        if old is page:
+            continue
+        try:
+            old.close()
+            closed += 1
+        except Exception:
+            pass
+    if closed:
+        print(f"закрыто старых вкладок: {closed}")
+    return page
+
+
 def open_profile():
     r = requests.post(f"{BIT_API}/browser/open", json={"id": PROFILE_ID},
                       headers=_headers(), timeout=60).json()
@@ -1442,7 +1465,7 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(ws)
             ctx = browser.contexts[0]
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page = fresh_page(ctx)
             # Дефолтные 30 секунд слишком жёсткие для прокси: одна медленная
             # страница превращалась в error на пустом месте. За прогон так
             # сгорало по полдюжины вакансий.

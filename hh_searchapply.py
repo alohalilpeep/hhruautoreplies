@@ -759,7 +759,7 @@ def main():
         with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp(ws)
             ctx = browser.contexts[0]
-            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            page = hh.fresh_page(ctx)
             page.set_default_navigation_timeout(hh.NAV_TIMEOUT)
             page.goto("https://hh.ru", wait_until="domcontentloaded")
             hh.pause(2, 3)
