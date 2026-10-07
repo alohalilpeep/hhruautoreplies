@@ -48,6 +48,7 @@ from playwright.sync_api import sync_playwright
 
 sys.path.insert(0, str(Path(__file__).parent))
 import hh_autoapply as hh
+import hh_choices
 import hh_human as human
 
 # Карточка вакансии в выдаче. Селектор точный, а не по префиксу: внутри
@@ -669,6 +670,28 @@ def run(page, db, pages, url=None, home=False):
     print(f"\nпросмотрено новых карточек: {seen}")
 
 
+def _answerable(question, kind, options, texts, picks_by_q, skip):
+    """Ответит ли hh.answer_questions на этот вопрос этой вакансии."""
+    qn = hh.normalize_question(question)
+    if qn in skip:
+        return False                           # человек решил такие обходить
+    if "radio" in kind or "checkbox" in kind:
+        picks = picks_by_q.get(qn) or []
+        labels = {o.strip() for o in (options or "").split("|")}
+        # Выбор хранится по тексту вопроса, а варианты у работодателей
+        # разные: «Полностью удалённый» с одной вакансии не найдётся среди
+        # «Офис / Гибрид / Удалённый» другой. «Свой вариант» кликер не жмёт.
+        return (bool(picks)
+                and all(p in labels and not hh_choices.OPEN_RE.search(p) for p in picks)
+                and ("checkbox" in kind or len(picks) == 1))
+    if "textarea" not in kind and "text" not in kind:
+        return False
+    if qn in texts:
+        return True
+    topic = hh.classify_question(question)
+    return bool(topic and topic in hh.ANSWERS)
+
+
 def answerable_deferred(db):
     """Отложенные вакансии, на все вопросы которых теперь есть ответы.
 
@@ -678,27 +701,20 @@ def answerable_deferred(db):
     увидит её, только если она снова попадётся на странице, а выдача
     меняется каждый день. Поэтому добираем такие вакансии из базы.
     """
-    bank = {qn: (st, cst, opts, (ch or "").strip()) for qn, st, cst, opts, ch in db.execute(
-        "SELECT qnorm, status, choice_status, options, choice FROM answer_bank")}
+    # Правила те же, что у hh.answer_questions: вакансия, которую тот всё
+    # равно отложит, здесь готовой не считается. Раньше проверка была мягче,
+    # и дозабор впустую открывал десятки вакансий, чтобы снова их отложить.
+    skip = {qn for qn, in db.execute(
+        "SELECT qnorm FROM answer_bank WHERE status='skip' OR choice_status='skip'")}
+    texts = hh.load_answer_bank(db)
+    picks_by_q = hh.load_choice_bank(db)
     out = []
     for vid, url in db.execute(
             "SELECT id, url FROM responses WHERE status='questions' AND url IS NOT NULL"):
-        qs = [q for q, in db.execute(
-            "SELECT question FROM questions WHERE vacancy_id=?", (vid,))]
-        if not qs:
-            continue
-        ok = True
-        for q in qs:
-            st, cst, opts, ch = bank.get(hh.normalize_question(q), (None, None, "", ""))
-            if st == "skip" or cst == "skip":
-                ok = False                     # человек решил такие обходить
-                break
-            if opts and cst == "approved" and ch:
-                continue                       # отвечаем кликом по варианту
-            if st != "approved":
-                ok = False
-                break
-        if ok:
+        qs = db.execute("SELECT question, kind, options FROM questions "
+                        "WHERE vacancy_id=?", (vid,)).fetchall()
+        if qs and all(_answerable(q, kind or "", opts, texts, picks_by_q, skip)
+                      for q, kind, opts in qs):
             out.append((vid, url))
     return out
 
