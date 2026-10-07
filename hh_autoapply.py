@@ -363,6 +363,34 @@ def normalize_question(text):
     return re.sub(r"\s+", " ", t).strip()
 
 
+def is_choice(kind):
+    return "radio" in (kind or "") or "checkbox" in (kind or "")
+
+
+def bank_key(question, kind=None, options=None):
+    """Ключ вопроса в банке.
+
+    Свободный ответ — по тексту вопроса. Вопрос с выбором — по тексту и
+    набору вариантов: «Какой формат работы?» у одного работодателя с
+    вариантом «Полностью удалённый», у другого с «Удалённый», и выбор,
+    одобренный под первый набор, второму не подходит. Под одним ключом
+    такие вакансии застревали навсегда: вопрос одобрен, но клик не находит
+    подпись.
+    """
+    qn = normalize_question(question)
+    if isinstance(options, str):
+        options = options.split("|")
+    opts = sorted({normalize_question(o) for o in (options or []) if o.strip()})
+    if not qn or not is_choice(kind) or not opts:
+        return qn
+    return f"{qn} ⟦{' | '.join(opts)}⟧"
+
+
+def base_of(key):
+    """Текст вопроса из ключа банка: без набора вариантов."""
+    return key.split(" ⟦", 1)[0]
+
+
 BLACKLIST_FILE = Path(__file__).with_name("blacklist.txt")
 
 
@@ -390,7 +418,8 @@ def load_skipped_questions(db):
         return set()
     try:
         return {q for (q,) in db.execute(
-            "SELECT qnorm FROM answer_bank WHERE status='skip'")}
+            "SELECT qnorm FROM answer_bank "
+            "WHERE status='skip' OR choice_status='skip'")}
     except sqlite3.OperationalError:
         return set()
 
@@ -426,6 +455,18 @@ def load_choice_bank(db):
         if picks:
             out[qnorm] = picks
     return out
+
+
+def load_choice_texts(db):
+    """Текст к «Своему варианту»: ключ банка → что вписать в поле."""
+    if db is None:
+        return {}
+    try:
+        rows = db.execute("SELECT qnorm, choice_text FROM answer_bank "
+                          "WHERE choice_status='approved' AND choice_text IS NOT NULL")
+    except sqlite3.OperationalError:
+        return {}
+    return {q: t.strip() for q, t in rows if t and t.strip()}
 
 
 def classify_question(text):
@@ -714,8 +755,64 @@ def init_db(path=None):
         db.execute("ALTER TABLE answer_bank ADD COLUMN choice TEXT")
     if "choice_status" not in bank_cols:
         db.execute("ALTER TABLE answer_bank ADD COLUMN choice_status TEXT")
+    # текст, который вписывается после выбора «Свой вариант»
+    if "choice_text" not in bank_cols:
+        db.execute("ALTER TABLE answer_bank ADD COLUMN choice_text TEXT")
     db.commit()
+    split_choice_keys(db)
     return db
+
+
+def split_choice_keys(db):
+    """Перевести вопросы с выбором на ключ «текст + набор вариантов».
+
+    Раньше выбор хранился по одному тексту вопроса, а варианты брались с
+    последней увиденной вакансии. Строка старого вида получает ключ по
+    своему набору вариантов (с выбором и статусом). Её место под старым
+    ключом остаётся без вариантов: там может лежать текстовый ответ, он
+    нужен, когда тот же вопрос встретится свободным полем. Затем каждой
+    паре «вопрос + варианты» из пула заводится своя строка; подходящий
+    уже одобренный выбор переносится, остальное уйдёт человеку в выгрузку.
+    Повторный запуск ничего не меняет.
+    """
+    try:
+        legacy = db.execute(
+            "SELECT qnorm, question, answer, status, ts, kind, options, choice, "
+            "choice_status FROM answer_bank WHERE options IS NOT NULL AND options != '' "
+            "AND qnorm NOT LIKE '%⟦%'").fetchall()
+    except sqlite3.OperationalError:
+        return
+    for qn, question, answer, status, ts, kind, options, choice, cst in legacy:
+        if not is_choice(kind):
+            continue
+        key = bank_key(question, kind, options)
+        if key != qn and not db.execute(
+                "SELECT 1 FROM answer_bank WHERE qnorm=?", (key,)).fetchone():
+            db.execute(
+                "INSERT INTO answer_bank (qnorm, question, answer, status, ts, kind, "
+                "options, choice, choice_status) VALUES (?,?,?,?,?,?,?,?,?)",
+                (key, question, "", "draft", ts, kind, options, choice, cst))
+        # Варианты у старой строки убираем: иначе она висела бы в выгрузке
+        # второй копией вопроса. Текстовый ответ и его статус остаются.
+        db.execute("UPDATE answer_bank SET options=NULL WHERE qnorm=?", (qn,))
+    for question, kind, options in db.execute(
+            "SELECT DISTINCT question, kind, options FROM questions").fetchall():
+        if is_choice(kind) and options:
+            key = bank_key(question, kind, options)
+            if not db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?",
+                              (key,)).fetchone():
+                remember_question(db, {"question": question, "kind": kind,
+                                       "options": [o.strip() for o in options.split("|")]})
+    # «Свой вариант» одобрен, а текста к нему нет: кликер его не выберет,
+    # а одобренное в выгрузку не попадает — вопрос завис бы насовсем.
+    # Возвращаем человеку, выбор оставляем как подсказку.
+    for key, choice in db.execute(
+            "SELECT qnorm, choice FROM answer_bank WHERE choice_status='approved' "
+            "AND TRIM(COALESCE(choice_text,''))=''").fetchall():
+        if any(OPEN_LABEL_RE.match(c) for c in (choice or "").split("|")):
+            db.execute("UPDATE answer_bank SET choice_status='needs_input' "
+                       "WHERE qnorm=?", (key,))
+    db.commit()
 
 
 def save_questions(db, vid, url, company, questions):
@@ -739,19 +836,41 @@ def save_questions(db, vid, url, company, questions):
 def remember_question(db, q, ts=None):
     """Завести вопрос в банке: тип поля и варианты. Ответы и статусы
     не трогаем — их ставит человек."""
-    qn = normalize_question(q["question"])
+    labels = q.get("options") or []
+    qn = bank_key(q["question"], q.get("kind"), labels)
     if not qn:
         return
     ts = ts or dt.datetime.now().isoformat(timespec="seconds")
-    opts = " | ".join(q.get("options") or []) or None
+    opts = " | ".join(labels) or None
     if db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?", (qn,)).fetchone():
         db.execute("UPDATE answer_bank SET kind=?, options=COALESCE(?, options) "
                    "WHERE qnorm=?", (q.get("kind"), opts, qn))
-    else:
-        db.execute(
-            "INSERT INTO answer_bank (qnorm, question, answer, status, ts, "
-            "kind, options) VALUES (?,?,?,?,?,?,?)",
-            (qn, q["question"].strip(), "", "draft", ts, q.get("kind"), opts))
+        return
+    db.execute(
+        "INSERT INTO answer_bank (qnorm, question, answer, status, ts, "
+        "kind, options) VALUES (?,?,?,?,?,?,?)",
+        (qn, q["question"].strip(), "", "draft", ts, q.get("kind"), opts))
+    if is_choice(q.get("kind")):
+        inherit_choice(db, qn, labels)
+
+
+def inherit_choice(db, key, labels):
+    """Новый набор вариантов у знакомого вопроса: взять уже одобренный выбор,
+    если все его подписи есть и здесь. Подписи совпадают дословно — значит,
+    это тот самый вариант, который человек уже выбрал. Не совпали — вопрос
+    уходит человеку в выгрузку отдельным блоком."""
+    base = base_of(key)
+    have = {l.strip() for l in labels}
+    for choice, text in db.execute(
+            "SELECT choice, choice_text FROM answer_bank "
+            "WHERE choice_status='approved' AND (qnorm=? OR qnorm LIKE ?) "
+            "ORDER BY ts DESC", (base, base + " ⟦%")).fetchall():
+        picks = [c.strip() for c in (choice or "").split("|") if c.strip()]
+        if picks and all(p in have for p in picks):
+            db.execute("UPDATE answer_bank SET choice=?, choice_status='approved', "
+                       "choice_text=? WHERE qnorm=?", (choice, text, key))
+            return True
+    return False
 
 
 def save(db, vid, url, title, company, status, letter_sent=False):
@@ -868,9 +987,14 @@ def scrape_questions(page):
         return []
 
 
-# «Свой вариант» раскрывает скрытое поле для произвольного текста —
-# автоматически его не выбираем никогда
+# «Свой вариант» раскрывает скрытое поле для произвольного текста. Выбираем
+# его, только если человек одобрил и сам текст (choice_text в банке).
 OPEN_VALUE = "open"
+OPEN_LABEL_RE = re.compile(r"^\s*(свой вариант|другое)\s*$", re.I)
+
+
+def is_open(opt):
+    return opt.get("value") == OPEN_VALUE or bool(OPEN_LABEL_RE.match(opt.get("label", "")))
 
 
 def pick_option(page, opt):
@@ -908,12 +1032,25 @@ def pick_option(page, opt):
         return False
 
 
-def plan_choice(q, picks):
+def fill_own_option(body, text):
+    """Вписать текст в поле, раскрывшееся после «Своего варианта».
+    Поле появляется не сразу, поэтому ждём его видимости."""
+    field = body.locator("textarea, input[type=text]").first
+    try:
+        field.wait_for(state="visible", timeout=5000)
+    except Exception:
+        return False
+    field.fill(text)
+    pause(0.5, 1.5)
+    return True
+
+
+def plan_choice(q, picks, text=""):
     """Сопоставить одобренные подписи с вариантами на странице.
 
     Возвращает список вариантов к отметке или None, если что-то не сошлось:
     подписи нет среди вариантов, на радиокнопке одобрено больше одного,
-    или выбран «свой вариант» со скрытым полем.
+    или выбран «свой вариант», а текста к нему нет.
     """
     avail = {c["label"]: c for c in (q.get("choices") or [])}
     if not avail:
@@ -921,7 +1058,7 @@ def plan_choice(q, picks):
     chosen = []
     for label in picks:
         opt = avail.get(label)
-        if opt is None or opt.get("value") == OPEN_VALUE:
+        if opt is None or (is_open(opt) and not (text or "").strip()):
             return None
         chosen.append(opt)
     single = "radio" in q["kind"] and "checkbox" not in q["kind"]
@@ -930,7 +1067,8 @@ def plan_choice(q, picks):
     return chosen
 
 
-def answer_questions(page, questions, bank=None, letter="", choices=None):
+def answer_questions(page, questions, bank=None, letter="", choices=None,
+                     choice_texts=None):
     """Заполнить анкету работодателя и отправить отклик.
 
     Источники ответа, в порядке приоритета:
@@ -950,19 +1088,23 @@ def answer_questions(page, questions, bank=None, letter="", choices=None):
         return None
     bank = bank or {}
     choices = choices or {}
+    choice_texts = choice_texts or {}
 
     plan = []
     for q in questions:
         qnorm = normalize_question(q["question"])
         # вопрос с вариантами: только одобренный выбор, шаблоны не применимы
-        if "radio" in q["kind"] or "checkbox" in q["kind"]:
-            picks = choices.get(qnorm)
+        if is_choice(q["kind"]):
+            key = bank_key(q["question"], q["kind"], q.get("options"))
+            picks = choices.get(key)
             if not picks:
                 return None
-            chosen = plan_choice(q, picks)
+            text = choice_texts.get(key, "")
+            chosen = plan_choice(q, picks, text)
             if chosen is None:
                 return None
-            plan.append(("choice", chosen))
+            own = text if any(is_open(o) for o in chosen) else ""
+            plan.append(("choice", (chosen, own)))
             continue
         if "textarea" not in q["kind"] and "text" not in q["kind"]:
             return None
@@ -981,9 +1123,12 @@ def answer_questions(page, questions, bank=None, letter="", choices=None):
 
     for i, (action, payload) in enumerate(plan):
         if action == "choice":
-            for opt in payload:
+            chosen, own = payload
+            for opt in chosen:
                 if not pick_option(page, opt):
                     return None   # вариант не отметился, анкету не отправляем
+            if own and not fill_own_option(bodies.nth(i), own):
+                return None       # поле «своего варианта» не раскрылось
             continue
         field = bodies.nth(i).locator("textarea, input[type=text]").first
         # В смешанных анкетах поле «уточните» лежит в разметке скрытым и
@@ -1394,12 +1539,12 @@ def apply(page, url, db=None):
             print(f"    собрано вопросов: {len(qs)}")
         # среди вопросов есть отброшенный вручную — вакансия не наша
         dropped = load_skipped_questions(db)
-        if dropped and any(normalize_question(q["question"]) in dropped
-                           for q in qs):
+        if dropped and any(bank_key(q["question"], q["kind"], q.get("options"))
+                           in dropped for q in qs):
             return "skipped_question", title, company
 
         answered = answer_questions(page, qs, load_answer_bank(db), letter,
-                                    load_choice_bank(db))
+                                    load_choice_bank(db), load_choice_texts(db))
         if answered == "needs_letter":
             return "needs_letter", title, company
         if answered:

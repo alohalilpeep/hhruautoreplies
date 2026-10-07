@@ -78,22 +78,7 @@ def scan(db, limit=None):
 def remember(db, questions):
     """Записать в банк тип поля и варианты. Ответы и статусы не трогаем."""
     for q in questions:
-        qn = hh.normalize_question(q["question"])
-        if not qn:
-            continue
-        opts = " | ".join(q["options"]) if q.get("options") else None
-        row = db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?",
-                         (qn,)).fetchone()
-        if row:
-            db.execute("UPDATE answer_bank SET kind=?, options=? WHERE qnorm=?",
-                       (q["kind"], opts, qn))
-        else:
-            db.execute(
-                "INSERT INTO answer_bank (qnorm, question, answer, status, ts,"
-                " kind, options) VALUES (?,?,?,?,?,?,?)",
-                (qn, q["question"].strip(), "", "draft",
-                 hh.dt.datetime.now().isoformat(timespec="seconds"),
-                 q["kind"], opts))
+        hh.remember_question(db, q)
     db.commit()
 
 
@@ -119,7 +104,8 @@ PERSONAL_RE = re.compile(
     r"|смен\w*\s*график|ночн|2/2"
     r"|возраст|зарплат|вилк|доход|оклад", re.I)
 
-# «Свой вариант» раскрывает скрытое поле — автоматически не выбираем
+# Варианты, которые черновик не подставляет сам: «Свой вариант» требует
+# текста от человека, «не могу оценить» — его решения
 OPEN_RE = re.compile(r"^свой вариант$|^другое$|^не могу оценить$", re.I)
 
 # Технологии из твоего резюме и одобренных ответов. Остальное в списках
@@ -229,6 +215,7 @@ HEAD = """# Выбор варианта в анкетах работодател
 #         skip — не отвечать на этот вопрос никогда.
 # ВЫБОР: скопируй подпись варианта ровно как в строке ВАРИАНТЫ.
 #        Для чекбоксов можно несколько, через « | ».
+#        «Свой вариант»: текст пиши строками сразу под ВЫБОР.
 # Отправляется только approved. Пустой выбор не отправляется никогда.
 """
 
@@ -242,14 +229,14 @@ def render(db, statuses=None):
     за вопрос со свободным ответом.
     """
     rows = db.execute(
-        "SELECT qnorm, question, kind, options, choice, choice_status "
+        "SELECT qnorm, question, kind, options, choice, choice_status, choice_text "
         "FROM answer_bank WHERE options IS NOT NULL AND options != '' "
         "ORDER BY CASE choice_status WHEN 'needs_input' THEN 0 "
         "WHEN 'draft' THEN 1 ELSE 2 END, question").fetchall()
     if statuses:
         rows = [r for r in rows if (r[5] or "needs_input") in statuses]
     out = []
-    for qnorm, question, kind, options, choice, cstatus in rows:
+    for qnorm, question, kind, options, choice, cstatus, own in rows:
         out.append(
             f"КЛЮЧ: {qnorm}\n"
             f"СТАТУС: {cstatus or 'needs_input'}\n"
@@ -257,7 +244,8 @@ def render(db, statuses=None):
             f"ВОПРОС: {' '.join(question.split())}\n"
             f"ВАРИАНТЫ: {options}\n"
             f"ВЫБОР: {choice or ''}\n"
-            "---")
+            + (f"{own.strip()}\n" if own and own.strip() else "")
+            + "---")
     return "\n".join(out), len(rows)
 
 
@@ -268,18 +256,27 @@ def export(db, path=EDIT_FILE):
     print(f"выгружено {n} в {path}")
 
 
+FIELD_RE = re.compile(r"^(КЛЮЧ|СТАТУС|ТИП|ВОПРОС|ВАРИАНТЫ|ВЫБОР):\s*(.*)$")
+
+
+def parse_block(block):
+    """Поля блока и текст «своего варианта» — строки после ВЫБОР."""
+    fields, own, after_pick = {}, [], False
+    for line in block.splitlines():
+        m = FIELD_RE.match(line.strip())
+        if m:
+            fields[m.group(1)] = m.group(2).strip()
+            after_pick = m.group(1) == "ВЫБОР"
+        elif after_pick and not line.lstrip().startswith("#"):
+            own.append(line.rstrip())
+    return fields, "\n".join(own).strip()
+
+
 def import_(db, path=EDIT_FILE):
     text = open(path, encoding="utf-8").read()
     ok = bad = 0
-    for block in text.split("---"):
-        fields = {}
-        for line in block.splitlines():
-            line = line.strip()
-            if line.startswith("#") or ":" not in line:
-                continue
-            k, v = line.split(":", 1)
-            if k.strip() in ("КЛЮЧ", "СТАТУС", "ВЫБОР", "ВАРИАНТЫ"):
-                fields[k.strip()] = v.strip()
+    for block in re.split(r"(?m)^---\s*$", text):
+        fields, own = parse_block(block)
         qnorm = fields.get("КЛЮЧ")
         if not qnorm:
             continue
@@ -296,8 +293,11 @@ def import_(db, path=EDIT_FILE):
             unknown = [p for p in picked if p not in valid]
             single = "radio" in kind and "checkbox" not in kind
             excl = [p for p in picked if NONE_RE.match(p)]
+            opened = [p for p in picked if hh.OPEN_LABEL_RE.match(p)]
             if not picked:
                 why = "пустой выбор"
+            elif opened and not own:
+                why = f"«{opened[0]}» без текста — напиши его строкой под ВЫБОР"
             elif unknown:
                 why = f"нет таких вариантов: {unknown}"
             elif single and len(picked) > 1:
@@ -310,8 +310,11 @@ def import_(db, path=EDIT_FILE):
                 print(f"  пропущен {qnorm[:8]}: {why}")
                 bad += 1
                 continue
-        db.execute("UPDATE answer_bank SET choice=?, choice_status=? "
-                   "WHERE qnorm=?", (choice, status, qnorm))
+        # текст хранится, только если выбран «Свой вариант»: иначе это
+        # просто пояснение для себя, и вписывать его некуда
+        keep = own if any(hh.OPEN_LABEL_RE.match(p) for p in picked) else None
+        db.execute("UPDATE answer_bank SET choice=?, choice_status=?, choice_text=? "
+                   "WHERE qnorm=?", (choice, status, keep or None, qnorm))
         ok += 1
     db.commit()
     print(f"обновлено: {ok}, пропущено: {bad}")

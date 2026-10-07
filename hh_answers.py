@@ -44,7 +44,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from hh_autoapply import (init_db, normalize_question, classify_question,
-                          ACCOUNT_NAME)
+                          is_choice, OPEN_LABEL_RE, ACCOUNT_NAME)
 import hh_choices
 import hh_profile
 
@@ -336,7 +336,11 @@ def fill(db):
     seen = {q for (q,) in db.execute("SELECT qnorm FROM answer_bank")}
     knowledge = load_knowledge()
     added, prefilled = 0, 0
-    for (question,) in db.execute("SELECT question FROM questions"):
+    for question, kind in db.execute("SELECT question, kind FROM questions").fetchall():
+        # вопросы с выбором заводит remember_question со своим ключом
+        # (текст + варианты); здесь только свободные ответы
+        if is_choice(kind):
+            continue
         qn = normalize_question(question)
         if not qn or qn in seen:
             continue
@@ -506,7 +510,7 @@ def _blocks(text):
     Значение — поля блока; ответ под «ОТВЕТ:» лежит в поле ОТВЕТ."""
     out = {}
     for block in re.split(rf"^{SEP}\s*$", text, flags=re.M):
-        fields, answer, in_answer = {}, [], False
+        fields, answer, in_answer, own = {}, [], False, []
         for line in block.splitlines():
             if in_answer:
                 if not line.lstrip().startswith("#"):
@@ -519,7 +523,10 @@ def _blocks(text):
                          r"\s*(.*)$", line)
             if m:
                 fields[m.group(1)] = m.group(2).strip()
+            elif "ВЫБОР" in fields and not line.lstrip().startswith("#"):
+                own.append(line)          # текст «своего варианта» под ВЫБОР
         fields["ОТВЕТ"] = "\n".join(answer).strip()
+        fields["СВОЙ"] = "\n".join(own).strip()
         for kind in ("ID", "КЛЮЧ"):
             if fields.get(kind):
                 out[(kind, fields[kind])] = fields
@@ -551,8 +558,12 @@ def check(path, against=None):
         pick = f.get("ВЫБОР", "")
         valid = [x.strip() for x in f.get("ВАРИАНТЫ", "").split("|")]
         bad = [x.strip() for x in pick.split("|") if pick and x.strip() not in valid]
+        opened = [x.strip() for x in pick.split("|") if OPEN_LABEL_RE.match(x)]
         if bad:
             errors.append(f"{ident}: вариант не из списка «{bad[0][:30]}» — {q}")
+        elif opened and status == "approved" and not f.get("СВОЙ"):
+            errors.append(f"{ident}: «{opened[0]}» без текста — напиши его "
+                          f"строкой под ВЫБОР — {q}")
         elif status == "approved" and not pick:
             errors.append(f"{ident}: approved с пустым выбором — {q}")
         elif "radio" in f.get("ТИП", "") and len(pick.split("|")) > 1:
