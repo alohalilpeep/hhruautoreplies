@@ -27,6 +27,8 @@ hh.ru/vacancy/<id> по прямой ссылке — двести раз под
     venv/bin/python hh_searchapply.py --foryou   подборка «Для вас» страницей поиска
     venv/bin/python hh_searchapply.py --main     то же, но прямо с главной страницы
     venv/bin/python hh_searchapply.py --pages 3  только первые 3 страницы
+    venv/bin/python hh_searchapply.py --fresh    сначала самые свежие вакансии
+                                                 (насовсем: SEARCH_ORDER=date в .env)
     venv/bin/python hh_searchapply.py --deferred только добрать отложенные из базы
 
 После обхода выдачи прогон сам добирает из базы отложенные вакансии
@@ -556,7 +558,11 @@ def run(page, db, pages, url=None, home=False):
         f"SELECT id FROM responses WHERE status NOT IN "
         f"({','.join('?' * len(retry))})", retry)}
 
-    url = url or hh.SEARCH_URL
+    if not url:
+        order = "date" if "--fresh" in sys.argv else hh.SEARCH_ORDER
+        url = hh.with_order(hh.SEARCH_URL, order)
+        if order == "date":
+            print("сортировка: сначала свежие")
     sep = "&" if "?" in url else "?"
     empty_rounds = 0
     seen = unknown_row = 0

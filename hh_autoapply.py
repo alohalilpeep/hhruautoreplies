@@ -38,6 +38,12 @@ ACCOUNT_NAME = (os.getenv("ACCOUNT_NAME", "").strip()
 
 # настрой поиск на hh руками со всеми фильтрами и положи URL в .env
 SEARCH_URL = os.getenv("SEARCH_URL", "")
+# Сортировка выдачи: relevance — как hh решит (по умолчанию), date — сначала
+# самые свежие. На свежую вакансию откликов ещё мало, и наш виден первым.
+# Разово включается ключом --fresh у hh_searchapply.py.
+SEARCH_ORDER = os.getenv("SEARCH_ORDER", "relevance").strip().lower()
+if SEARCH_ORDER not in ("relevance", "date"):
+    raise SystemExit(f"SEARCH_ORDER={SEARCH_ORDER!r} — допустимо relevance или date")
 MAX_PAGES = int(os.getenv("MAX_PAGES", "5"))          # сколько страниц выдачи обходить
 # Широкий запрос для анализа рынка: откликаемся по узкому SEARCH_URL,
 # а статистику собираем по этому. Пустой — используется SEARCH_URL.
@@ -563,6 +569,23 @@ def _headers():
     return {"x-api-key": BIT_API_KEY} if BIT_API_KEY else {}
 
 
+def with_order(url, order=None):
+    """URL выдачи с нужной сортировкой. date → order_by=publication_time.
+
+    Старый order_by из URL убирается: hh берёт первый, и сортировка,
+    сохранённая в SEARCH_URL, тихо перебивала бы выбранную.
+    """
+    order = order or SEARCH_ORDER
+    if order == "relevance" or not url:
+        return url
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != "order_by"]
+    query.append(("order_by", "publication_time"))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
 def fresh_page(ctx):
     """Открыть чистую вкладку, а все прочие в профиле закрыть.
 
@@ -766,7 +789,7 @@ def collect(page, url=None, pages=None):
     а широкий рыночный: откликаемся по узкому, а статистику собираем по
     широкому, и лимиты у них разные.
     """
-    url = url or SEARCH_URL
+    url = url or with_order(SEARCH_URL)
     pages = pages or MAX_PAGES
     found = {}
     sep = "&" if "?" in url else "?"
