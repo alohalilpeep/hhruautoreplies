@@ -1,11 +1,14 @@
 """Вопросы ИИ-помощника hh из чатов — в общий бланк ответов, ответы — обратно в чат.
 
     python scripts/ai_chats.py collect [N]
-        пройти N свежих чатов (по умолчанию 30) на всех трёх аккаунтах; где
-        ИИ-помощник ждёт ответа, занести его вопрос в банк ответов. Дальше он
-        выгружается обычным questions.sh export с пометкой в строке КОМПАНИЯ
-        «ИИ-помощник в чате». Вопрос, на который в банке уже есть одобренный
-        ответ, в бланк не попадёт — на него reply ответит сразу.
+        пройти N свежих чатов (по умолчанию 30) на всех трёх аккаунтах и
+        запомнить, где ИИ-помощник ждёт ответа и на какой вопрос
+    python scripts/ai_chats.py export
+        дописать эти вопросы отдельной частью 3 в конец свежего бланка
+        (после questions.sh export). Вопрос, на который в банке уже есть
+        одобренный ответ, в бланк не попадает — на него reply ответит сразу
+    python scripts/ai_chats.py take [--dry]
+        забрать ответы из части 3 в банк и отправить их в чаты
     python scripts/ai_chats.py reply [--dry]
         отправить одобренные ответы в чаты, где помощник всё ещё ждёт именно
         этого ответа. --dry только показывает, что было бы отправлено.
@@ -172,18 +175,12 @@ def collect_one(short, limit):
         qn = hh.normalize_question(q)
         db.execute("INSERT OR REPLACE INTO ai_chat_pending VALUES (?,?,?,?,?,?,?)",
                    (c["id"], c["company"], c["vacancy"], q, qn, "waiting", ts))
+        # Вопросы помощника живут только здесь: в бланк их выносит export
+        # отдельной частью в конце, в общий пул вопросов вакансий не кладём.
         if qn in bank:
             known += 1
-            continue
-        # В пул вопросов — ради строки КОМПАНИЯ в бланке; в банк — чтобы
-        # вопрос выгрузился обычным export как текстовый.
-        db.execute("INSERT OR REPLACE INTO questions VALUES (?,?,?,?,?,?,?,?)",
-                   (f"chat:{c['id']}", f"https://hh.ru/chat/{c['id']}",
-                    f"{c['company']} · {MARK}", 0, q, "textarea", "", ts))
-        if not db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?", (qn,)).fetchone():
-            db.execute("INSERT INTO answer_bank (qnorm, question, answer, status, ts, kind) "
-                       "VALUES (?,?,?,?,?,?)", (qn, q, "", "needs_input", ts, "textarea"))
-        new += 1
+        else:
+            new += 1
     db.commit()
     print(f"######## {short}: чатов просмотрено {min(len(chats), limit)}, "
           f"помощник ждёт ответа в {len(rows)}: в бланк {new}, уже есть ответ {known}")
@@ -191,9 +188,98 @@ def collect_one(short, limit):
         print(f"  ⚑ {c['company'][:30]} | {c['vacancy'][:40]} | {q[:120]}")
 
 
-# ---------------- reply ----------------
-def reply_one(short, dry):
+# ---------------- бланк: часть 3 ----------------
+PART3 = "# ЧАСТЬ 3. ИИ-ПОМОЩНИК HH В ЧАТАХ"
+PART3_HEAD = f"""
+# ======================================================================
+{PART3} — пиши ответ после «ОТВЕТ:»
+#
+# Вопросы, которые ИИ-помощник задаёт в чате после отклика. Ответ уйдёт
+# ему в чат. Строку ЧАТ не трогай. Не хочешь отвечать — СТАТУС: skip.
+# Ответ сохранится в банк: тот же вопрос в другом чате ответится сам.
+# ======================================================================
+"""
+
+
+def latest_blank(short):
+    from pathlib import Path
+    files = sorted(Path(f"{BASE}/{ACCS[short]}/questions/new").glob("*.txt"),
+                   key=lambda p: p.stat().st_mtime)
+    return files[-1] if files else None
+
+
+def export_one(short):
+    """Дописать часть 3 в конец свежего бланка. Старую часть 3 заменить."""
     hh = account(short)
+    db = hh.init_db()
+    init_table(db)
+    bank = hh.load_answer_bank(db)
+    rows = [r for r in db.execute(
+        "SELECT chat_id, company, vacancy, question, qnorm FROM ai_chat_pending "
+        "WHERE status='waiting' ORDER BY ts").fetchall() if r[4] not in bank]
+    path = latest_blank(short)
+    if path is None:
+        print(f"######## {short}: бланка нет — сначала questions.sh export")
+        return
+    text = path.read_text(encoding="utf-8")
+    i = text.find(PART3)
+    if i >= 0:                                   # убрать старую часть 3
+        text = text[:text.rfind("# ====", 0, i)].rstrip() + "\n"
+    if rows:
+        blocks = "".join(
+            f"---\nЧАТ: {cid}\nСТАТУС: needs_input\nКОМПАНИЯ: {comp}\n"
+            f"ВАКАНСИЯ: {vac}\nВОПРОС: {q}\nОТВЕТ:\n\n"
+            for cid, comp, vac, q, _ in rows)
+        text = text.rstrip() + "\n" + PART3_HEAD + "\n" + blocks + "---\n"
+    path.write_text(text, encoding="utf-8")
+    print(f"######## {short}: в {path.name} вопросов ИИ-помощника: {len(rows)}")
+    for cid, comp, vac, q, _ in rows:
+        print(f"  ⚑ {comp[:30]} | {q[:110]}")
+
+
+def take_one(short, dry):
+    """Забрать ответы из части 3 в банк и отправить их в чаты."""
+    hh = account(short)
+    from hh_answers import _parse_status
+    db = hh.init_db()
+    init_table(db)
+    path = latest_blank(short)
+    got = skipped = 0
+    if path is not None:
+        for block in re.split(r"(?m)^---\s*$", path.read_text(encoding="utf-8")):
+            m = re.search(r"(?m)^ЧАТ:\s*(\S+)", block)
+            if not m:
+                continue
+            st = _parse_status((re.search(r"(?m)^СТАТУС:\s*(.*)$", block) or [None, ""])[1])
+            ans = block.split("ОТВЕТ:", 1)[1] if "ОТВЕТ:" in block else ""
+            ans = "\n".join(l for l in ans.splitlines()
+                            if not l.lstrip().startswith("#")).strip()
+            row = db.execute("SELECT question, qnorm FROM ai_chat_pending WHERE chat_id=?",
+                             (m.group(1),)).fetchone()
+            if not row:
+                continue
+            if st == "skip":
+                db.execute("UPDATE ai_chat_pending SET status='skip' WHERE chat_id=?",
+                           (m.group(1),))
+                skipped += 1
+            elif st == "approved" and ans:
+                ts = dt.datetime.now().isoformat(timespec="seconds")
+                if db.execute("SELECT 1 FROM answer_bank WHERE qnorm=?", (row[1],)).fetchone():
+                    db.execute("UPDATE answer_bank SET answer=?, status='approved', ts=? "
+                               "WHERE qnorm=?", (ans, ts, row[1]))
+                else:
+                    db.execute("INSERT INTO answer_bank (qnorm, question, answer, status, ts, kind)"
+                               " VALUES (?,?,?,?,?,?)", (row[1], row[0], ans, "approved", ts,
+                                                         "textarea"))
+                got += 1
+        db.commit()
+    print(f"######## {short}: из бланка ответов {got}, skip {skipped}")
+    reply_one(short, dry, hh=hh)
+
+
+# ---------------- reply ----------------
+def reply_one(short, dry, hh=None):
+    hh = hh or account(short)
     from playwright.sync_api import sync_playwright
     db = hh.init_db()
     init_table(db)
@@ -277,6 +363,14 @@ if __name__ == "__main__":
         each_account("collect-one", a[1] if len(a) > 1 else "30")
     elif a[:1] == ["collect-one"] and len(a) == 3 and a[1] in ACCS:
         collect_one(a[1], int(a[2]))
+    elif a[:1] == ["export"]:
+        each_account("export-one")
+    elif a[:1] == ["export-one"] and len(a) == 2 and a[1] in ACCS:
+        export_one(a[1])
+    elif a[:1] == ["take"] and (len(a) < 2 or a[1] == "--dry"):
+        each_account("take-one", *(a[1:2]))
+    elif a[:1] == ["take-one"] and len(a) >= 2 and a[1] in ACCS:
+        take_one(a[1], "--dry" in a)
     elif a[:1] == ["reply"] and (len(a) < 2 or a[1] == "--dry"):
         each_account("reply-one", *(a[1:2]))
     elif a[:1] == ["reply-one"] and len(a) >= 2 and a[1] in ACCS:
