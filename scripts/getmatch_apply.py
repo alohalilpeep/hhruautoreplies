@@ -2,8 +2,11 @@
 
     python scripts/getmatch_apply.py <hh|hh2|hh3> [--dry] [--limit N]
 
---dry   только показать, на что откликнулись бы
---limit сколько откликов максимум за этот запуск (по умолчанию DAILY)
+--dry    только показать, на что откликнулись бы
+--limit  сколько откликов максимум за этот запуск (по умолчанию DAILY)
+--export вакансии с вопросами работодателя в письме — частью 5 в конец
+         свежего бланка (после questions.sh export и ai_chats.sh export)
+--take   забрать ответы части 5 и отправить эти отклики с твоим текстом
 
 Как устроено. Вакансии берём из API getmatch (/api/offers) из-под входа
 профиля: специальность DevOps и SRE, грейд Middle и Senior, только
@@ -57,6 +60,10 @@ def init_table(db):
         salary_taxes TEXT, salary_hidden INTEGER, formats TEXT, cities TEXT,
         skills TEXT, english TEXT, cover_letter_required INTEGER,
         applied INTEGER, first_seen TEXT, last_seen TEXT)""")
+    # вакансии, где работодатель задал вопросы в письме: ждут ответа в бланке
+    db.execute("""CREATE TABLE IF NOT EXISTS gm_pending (
+        id INTEGER PRIMARY KEY, url TEXT, position TEXT, company TEXT,
+        questions TEXT, answer TEXT, status TEXT, ts TEXT)""")
     # ключ компании — её ссылка на getmatch (id API не отдаёт), у скрытых — название
     db.execute("""CREATE TABLE IF NOT EXISTS gm_companies (
         key TEXT PRIMARY KEY, name TEXT, url TEXT,
@@ -171,7 +178,86 @@ def apply_one(hh, page, offer, letter):
     return "sent", letter_sent
 
 
-def main(short, dry, limit):
+# ---------------- бланк: часть 5 ----------------
+PART5 = "# ЧАСТЬ 5. GETMATCH: ВОПРОСЫ РАБОТОДАТЕЛЯ В ПИСЬМЕ"
+BAR = "# " + "=" * 70
+HEAD5 = f"""
+{BAR}
+{PART5}
+#
+# Работодатель задал вопросы прямо в сопроводительном письме. Напиши после
+# «ОТВЕТ:» письмо с ответами — оно уйдёт целиком вместо обычного письма.
+# Строку GETMATCH не трогай. Не хочешь откликаться — СТАТУС: skip.
+{BAR}
+"""
+
+
+def latest_blank(short):
+    from pathlib import Path
+    files = sorted(Path(f"{BASE}/{ACCS[short]}/questions/new").glob("*.txt"),
+                   key=lambda p: p.stat().st_mtime)
+    return files[-1] if files else None
+
+
+def export_blank(short):
+    """Дописать часть 5 в конец свежего бланка (после частей 3–4 ботов)."""
+    hh = account(short)
+    db = hh.init_db()
+    init_table(db)
+    rows = db.execute("SELECT id, url, position, company, questions FROM gm_pending "
+                      "WHERE status='waiting' ORDER BY ts").fetchall()
+    path = latest_blank(short)
+    if path is None:
+        print(f"getmatch {short}: бланка нет — сначала questions.sh export")
+        return
+    text = path.read_text(encoding="utf-8")
+    i = text.find(PART5)
+    if i >= 0:                                   # заменить старую часть 5
+        text = text[:text.rfind(BAR, 0, i)].rstrip() + "\n"
+    if rows:
+        blocks = []
+        for vid, url, pos, comp, qs in rows:
+            asked = "\n".join("# " + l for l in (qs or "").splitlines())
+            blocks.append(f"---\nGETMATCH: {vid}\nСТАТУС: needs_input\nКОМПАНИЯ: {comp}\n"
+                          f"ВАКАНСИЯ: {pos}\nССЫЛКА: {url}\n# ВОПРОСЫ РАБОТОДАТЕЛЯ:\n"
+                          f"{asked}\nОТВЕТ:\n\n")
+        text = text.rstrip() + "\n" + HEAD5 + "\n" + "".join(blocks) + "---\n"
+    path.write_text(text, encoding="utf-8")
+    print(f"getmatch {short}: в {path.name} вакансий с вопросами в письме: {len(rows)}")
+    for vid, url, pos, comp, _ in rows:
+        print(f"  ⚑ {comp[:30]} | {pos[:60]}")
+
+
+def take_blank(short):
+    """Забрать ответы части 5: approved — в gm_pending.answer, skip — skip."""
+    hh = account(short)
+    from hh_answers import _parse_status
+    db = hh.init_db()
+    init_table(db)
+    path = latest_blank(short)
+    got = skipped = 0
+    if path is not None:
+        for block in re.split(r"(?m)^---\s*$", path.read_text(encoding="utf-8")):
+            m = re.search(r"(?m)^GETMATCH:\s*(\d+)", block)
+            if not m:
+                continue
+            vid = int(m.group(1))
+            st = _parse_status((re.search(r"(?m)^СТАТУС:\s*(.*)$", block) or [None, ""])[1])
+            ans = block.split("\nОТВЕТ:", 1)[1] if "\nОТВЕТ:" in block else ""
+            ans = "\n".join(l for l in ans.splitlines() if not l.lstrip().startswith("#")).strip()
+            if st == "skip":
+                db.execute("UPDATE gm_pending SET status='skip' WHERE id=?", (vid,))
+                skipped += 1
+            elif st == "approved" and ans:
+                db.execute("UPDATE gm_pending SET answer=?, status='answered' WHERE id=?",
+                           (ans, vid))
+                got += 1
+        db.commit()
+    print(f"getmatch {short}: из бланка принято ответов {got}, skip {skipped}")
+    return got
+
+
+def main(short, dry, limit, only_answered=False):
     hh = account(short)
     from playwright.sync_api import sync_playwright
     db = hh.init_db()
@@ -216,9 +302,24 @@ def main(short, dry, limit):
                     todo.append(o)
             print(f"getmatch {short}: вакансий {len(offers)}, к отклику {len(todo)}, "
                   f"пропущено {skipped}; лимит на запуск {left}")
+            ts = dt.datetime.now().isoformat(timespec="seconds")
             for o in questions:
                 print(f"  ⚑ вопросы в письме: {o['position'][:50]} | "
                       f"{o['company'].get('name', '')[:25]} | {o['url']}")
+                db.execute("""INSERT INTO gm_pending VALUES (?,?,?,?,?,NULL,'waiting',?)
+                    ON CONFLICT(id) DO UPDATE SET questions=excluded.questions""",
+                           (o["id"], "https://getmatch.ru" + o["url"], o["position"],
+                            o["company"].get("name", ""),
+                            (o.get("cover_letter_placeholder") or "").strip(), ts))
+            db.commit()
+            # Ответы, которые человек дал в бланке: отправляем первыми, письмом
+            # идёт его текст. Остальное — как обычно, обычным письмом.
+            answered = {r[0]: r[1] for r in db.execute(
+                "SELECT id, answer FROM gm_pending WHERE status='answered'")}
+            by_id = {o["id"]: o for o in offers}
+            ready = [by_id[i] for i in answered if i in by_id
+                     and not by_id[i].get("application") and i not in done]
+            todo = ready + ([] if only_answered else todo)
             if dry:
                 if todo:                     # проверка, что API карточки отвечает
                     st = page.evaluate("u => fetch(u, {credentials: 'include'})"
@@ -234,7 +335,7 @@ def main(short, dry, limit):
                     print("лимит достигнут, останавливаюсь")
                     break
                 comp = o["company"].get("name", "")
-                letter = hh.render_letter(hh.clean_title(o["position"]), comp)
+                letter = answered.get(o["id"]) or hh.render_letter(hh.clean_title(o["position"]), comp)
                 try:
                     status, with_letter = apply_one(hh, page, o, letter)
                 except Exception as e:
@@ -250,6 +351,8 @@ def main(short, dry, limit):
                 if status == "applied":
                     sent += 1
                     db.execute("UPDATE gm_vacancies SET applied=1 WHERE id=?", (o["id"],))
+                    db.execute("UPDATE gm_pending SET status='sent', ts=? WHERE id=?",
+                               (ts, o["id"]))
                     db.commit()
                 hh.pause(20, 45)
             print(f"getmatch {short}: отправлено {sent}, за сегодня {sent_today(db)}")
@@ -263,5 +366,11 @@ if __name__ == "__main__":
     if not a or a[0] not in ACCS:
         print(__doc__)
         sys.exit(2)
-    lim = int(a[a.index("--limit") + 1]) if "--limit" in a else DAILY
-    main(a[0], "--dry" in a, lim)
+    if "--export" in a:
+        export_blank(a[0])
+    elif "--take" in a:
+        if take_blank(a[0]):                     # отправить только отвеченные
+            main(a[0], False, DAILY, only_answered=True)
+    else:
+        lim = int(a[a.index("--limit") + 1]) if "--limit" in a else DAILY
+        main(a[0], "--dry" in a, lim)
