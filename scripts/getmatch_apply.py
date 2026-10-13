@@ -368,7 +368,27 @@ if __name__ == "__main__":
     if not a or a[0] not in ACCS:
         print(__doc__)
         sys.exit(2)
-    if "--export" in a:
+    if "--collect-all" in a:                     # весь getmatch в базу, для B2B-выгрузки
+        hh = account(a[0])
+        from playwright.sync_api import sync_playwright
+        db = hh.init_db()
+        init_table(db)
+        ws = hh.open_profile()
+        try:
+            with sync_playwright() as p:
+                page = p.chromium.connect_over_cdp(ws).contexts[0].new_page()
+                page.goto("https://getmatch.ru/vacancies", wait_until="domcontentloaded")
+                hh.pause(2, 3)
+                offers = fetch_offers(page, "/api/offers?sa=any&pa=all&limit=50"
+                                            "&offset={offset}&p={page}")
+                remember_offers(db, offers)
+                print(f"getmatch: собрано {len(offers)}, в базе вакансий "
+                      f"{db.execute('SELECT COUNT(*) FROM gm_vacancies').fetchone()[0]}, компаний "
+                      f"{db.execute('SELECT COUNT(*) FROM gm_companies').fetchone()[0]}")
+                page.close()
+        finally:
+            hh.close_profile()
+    elif "--export" in a:
         export_blank(a[0])
     elif "--take" in a:
         if take_blank(a[0]):                     # отправить только отвеченные
