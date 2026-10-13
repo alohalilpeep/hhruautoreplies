@@ -455,14 +455,26 @@ def inn_ok(inn):
     return False
 
 
+import threading
+SITE_LOCK = threading.Lock()
+_site_writes = [0]
+
+
+def save_site_cache(cache):
+    with SITE_LOCK:
+        SITE_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+
+
 def fetch_site(cache, url):
-    """Текст страницы (или маркер ошибки), с кэшем и паузой 1.5 с."""
+    """Текст страницы (или маркер ошибки), с кэшем и паузой 1.5 с. Потокобезопасно:
+    кэш на диск — раз в 20 новых страниц и в конце шага."""
     import time
     import requests
-    if url in cache:
-        return cache[url]
+    with SITE_LOCK:
+        if url in cache:
+            return cache[url]
     try:
-        r = requests.get(url, timeout=15, headers={
+        r = requests.get(url, timeout=(5, 15), headers={
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/128.0 Safari/537.36",
             "Accept-Language": "ru-RU,ru;q=0.9"})
@@ -474,10 +486,14 @@ def fetch_site(cache, url):
     text = re.sub(r"<script.*?</script>|<style.*?</style>", " ", text, flags=re.S | re.I)
     text = re.sub(r"<[^>]+>", " ", text)
     text = re.sub(r"&nbsp;|&#160;|\s+", " ", text)
-    cache[url] = text[-60000:]                     # реквизиты почти всегда в футере
-    SITE_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    text = text[-60000:]                           # реквизиты почти всегда в футере
+    with SITE_LOCK:
+        cache[url] = text
+        _site_writes[0] += 1
+        if _site_writes[0] % 20 == 0:
+            SITE_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
     time.sleep(1.5)
-    return cache[url]
+    return text
 
 
 def site_inn(cache, site):
@@ -559,7 +575,9 @@ def step2b():
     db = sqlite3.connect(FNS_DB)
     stat = Counter()
     todo = [r for r in rows if r.get("Уверенность сопоставления") == "ручная"]
-    for i, r in enumerate(todo, 1):
+
+    def crawl(r):
+        """Сетевая часть по одной компании: сайт (угаданный, если поиск не дошёл) и ИНН с него."""
         x = sites.get(r["Компания"]) or {"company": r["Компания"], "note": "лимит"}
         unsearched = not x.get("site") and re.search(r"лимит", x.get("note") or "")
         if unsearched:                             # поиск не дошёл — пробуем угадать домен
@@ -568,20 +586,34 @@ def step2b():
                 if not text.startswith("#") and brand_on_page(r["Компания"], text):
                     x = dict(x, site=url, guessed=True)
                     break
-            if not x.get("site"):
-                r["Причина ручной проверки"] = "сайт не искали (лимит поиска), домен не угадан"
-                stat["не искали, домен не угадан"] += 1
-                continue
-            stat["домен угадан"] += 1
-        if x.get("site"):
-            r["Сайт"] = x["site"]
-        ident, foreign, captcha = None, bool(x.get("foreign")), False
+        ident, foreign, captcha, src = None, bool(x.get("foreign")), False, ""
         if x.get("inn") and inn_ok(str(x["inn"])):
             ident, src = str(x["inn"]), "поиск"
         elif x.get("site"):
             ident, f2, captcha = site_inn(scache, x["site"])
             foreign = foreign or (f2 and not ident)
             src = "сайт (домен угадан)" if x.get("guessed") else "сайт"
+        return x, bool(unsearched), ident, foreign, captcha, src
+
+    # сайты разные, поэтому качаем по 8 параллельно; пауза 1.5 с — внутри каждого потока
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(8) as pool:
+        crawled = []
+        for i, res in enumerate(pool.map(crawl, todo), 1):
+            crawled.append(res)
+            if i % 25 == 0:
+                print(f"  … {i}/{len(todo)}", flush=True)
+    save_site_cache(scache)
+
+    for r, (x, unsearched, ident, foreign, captcha, src) in zip(todo, crawled):
+        if unsearched and not x.get("site"):
+            r["Причина ручной проверки"] = "сайт не искали (лимит поиска), домен не угадан"
+            stat["не искали, домен не угадан"] += 1
+            continue
+        if unsearched:
+            stat["домен угадан"] += 1
+        if x.get("site"):
+            r["Сайт"] = x["site"]
         if captcha:
             stat["капча на сайте"] += 1
             r["Пометка"] = "капча на сайте, ИНН не проверен"
@@ -609,8 +641,6 @@ def step2b():
             stat["не РФ / нет юрлица РФ" + (" (нет сайта)" if not x.get("site") else "")] += 1
         else:
             stat["сайт есть, ИНН на нём не найден"] += 1
-        if i % 25 == 0:
-            print(f"  … {i}/{len(todo)}", flush=True)
     (WORK / "step2b.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1, default=str),
                                      encoding="utf-8")
     print(f"\nстрок на поиск по сайтам: {len(todo)}")
