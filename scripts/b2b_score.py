@@ -436,8 +436,10 @@ SITE_PAGES = ("", "/contacts", "/requisites", "/about", "/privacy", "/policy", "
 NOT_RF = "не РФ / нет юрлица РФ"
 INN_RE = re.compile(r"(?:ИНН|INN)[\s:№/]*(?:КПП[\s:№]*\d{9}[\s,;/]*)?(\d{12}|\d{10})(?!\d)")
 OGRN_RE = re.compile(r"(?:ОГРН(?:ИП)?|OGRN)[\s:№]*(\d{15}|\d{13})(?!\d)")
-FOREIGN_RE = re.compile(r"\b(ТОО|TOO|БИН|LLC|Ltd\.?|Limited|GmbH|ЧК|Inc\.)\b|Kazakhstan|Казахстан"
-                        r"|Узбекистан|Uzbekistan|Грузи[яи]|Georgia|Cyprus|Кипр|Армени[яи]", re.I)
+# «не РФ» — только по форме юрлица (правило 13.10.2026), страны в тексте не считаются:
+# на российском сайте может быть «офис в Казахстане».
+FOREIGN_FORM = r"(?<![\w.])(ТОО|TOO|LLC|L\.L\.C\.?|Ltd\.?|LTD|GmbH|ЧК|Inc\.?|B\.V\.)(?![\w])"
+FOREIGN_RE = re.compile(FOREIGN_FORM)
 CAPTCHA_RE = re.compile(r"captcha|cf-chl|challenge-platform|ddos-guard|are you a robot|"
                         r"подтвердите, что вы не робот", re.I)
 
@@ -586,7 +588,9 @@ def step2b():
                 if not text.startswith("#") and brand_on_page(r["Компания"], text):
                     x = dict(x, site=url, guessed=True)
                     break
-        ident, foreign, captcha, src = None, bool(x.get("foreign")), False, ""
+        # флаг поиска «foreign» сам по себе не доказательство — нужна форма юрлица
+        ident, captcha, src = None, False, ""
+        foreign = bool(x.get("foreign") and FOREIGN_RE.search(x.get("legal") or ""))
         if x.get("inn") and inn_ok(str(x["inn"])):
             ident, src = str(x["inn"]), "поиск"
         elif x.get("site"):
@@ -635,10 +639,13 @@ def step2b():
             stat[f"ИНН найден ({src})"] += 1
         elif party:
             stat["ИНН с сайта — ликвидировано"] += 1
-        elif foreign or not x.get("site"):
+        elif foreign:
             r["Регион"] = NOT_RF
-            r["Причина ручной проверки"] = ("юрлицо не РФ" if foreign else "сайт не найден")
-            stat["не РФ / нет юрлица РФ" + (" (нет сайта)" if not x.get("site") else "")] += 1
+            r["Причина ручной проверки"] = "юрлицо не РФ"
+            stat["не РФ (иностранное юрлицо подтверждено)"] += 1
+        elif not x.get("site"):
+            r["Причина ручной проверки"] = "сайт не найден"
+            stat["сайт не найден"] += 1
         else:
             stat["сайт есть, ИНН на нём не найден"] += 1
     (WORK / "step2b.json").write_text(json.dumps(rows, ensure_ascii=False, indent=1, default=str),
@@ -654,8 +661,33 @@ TODAY = "2026-10-13"
 LEAD_RE = rx(r"\bhead\b", r"\blead\b", r"руковод", r"тимлид", r"team ?lead", r"tech ?lead",
              r"архитект", r"architect", r"единственн", r"первый devops", r"first devops")
 JUNIOR_RE = rx(r"junior", r"джун", r"младш", r"стаж", r"trainee", r"intern", r"ученик")
-FOREIGN_NAME = re.compile(r"^\s*(ТОО|TOO|ЧК|ИП ООО)\b|\b(LLC|Ltd|GmbH|Georgia|Tashkent|Kazakhstan|"
-                          r"Грузия|Ташкент|Казахстан|Узбекистан|Армения)\b", re.I)
+FOREIGN_NAME = re.compile(FOREIGN_FORM, re.I)
+# DevOps-фильтр для волн 1–2 — по НАЗВАНИЯМ вакансий; «инфраструктур» само по себе не в счёт
+DEVOPS_TITLE = rx(r"devops", r"\bsre\b", r"site reliability", r"platform engineer", r"платформ",
+                  r"kubernetes", r"\bk8s\b", r"devsecops", r"mlops", r"ci/cd",
+                  r"релиз.?инженер", r"release engineer", r"инфраструктуры и автоматизации")
+# сисадмин с таким стеком — максимум волна 2
+DEVOPS_STACK = rx(r"ansible", r"terraform", r"docker", r"kubernetes", r"\bk8s\b")
+# Дочки крупных групп (DaData бесплатно учредителей не отдаёт): ИНН или начало
+# названия компании → группа. Только те, в принадлежности которых уверен (13.10.2026).
+GROUP_CHILD = {
+    "7716971253": "Аэрофлот",                  # АФЛТ-Системс
+    "7736249247": "Сбер",                      # Домклик
+    "7729405872": "Татнефть",                  # Банк Зенит
+    "7708119944": "Роснефть",                  # ИК Сибинтек
+    "ао центр биометрических": "Ростелеком",   # ЦБТ, оператор ЕБС
+    "росэлторг": "ВТБ",
+    "ао «силовые машины»": "Севергрупп",
+    "пао т плюс": "Ренова",
+    "ашан": "Auchan",
+}
+
+
+def group_of(r):
+    if r.get("ИНН") in GROUP_CHILD:
+        return GROUP_CHILD[r["ИНН"]]
+    name = low(r["Компания"])
+    return next((g for k, g in GROUP_CHILD.items() if not k.isdigit() and name.startswith(k)), "")
 OFFERS = [
     (1, "Chaos-тест отказоустойчивости", rx(r"\bsre\b", r"reliability", r"high availability",
                                              r"\bha\b", r"инцидент", r"надежн", r"надёжн")),
@@ -670,8 +702,9 @@ OFFERS = [
                                     r"яндекс ?облак", r"оптимизац\w* затрат", r"finops")),
     (5, "Пилотная миграция 1 сервиса", rx(r"миграц", r"переезд", r"импортозамещ", r"astra",
                                           r"астра", r"red ?os", r"ред ?ос")),
-    (6, "Ansible для железа", rx(r"bare.?metal", r"сервер", r"виртуализ", r"vmware", r"proxmox",
-                                  r"linux.?админ", r"системн\w* админ", r"ansible")),
+    # «системный администратор» сам по себе не триггер (правило 13.10.2026)
+    (6, "Ansible для железа", rx(r"ansible", r"bare.?metal", r"серверн\w* оборудован",
+                                  r"виртуализ", r"vmware", r"proxmox")),
     (7, "Единое dev-окружение на Docker", rx(r"помощь разработчик", r"рост команды", r"онбординг",
                                              r"docker", r"dev.?окружен")),
     (8, "Тест-стенды на каждый PR", rx(r"тестов\w* сред", r"\bstage\b", r"staging", r"qa.?окружен",
@@ -760,6 +793,8 @@ def post_filter(r):
         return "гос"
     if staff is not None and staff > 3000:
         return "гигант"
+    if group_of(r):
+        return f"гигант (группа {group_of(r)})"
     if code.startswith("70.22"):
         return "посредник?"
     return ""
@@ -784,19 +819,29 @@ def step3():
         r["Кого искать"] = "CTO" if staff is None else next(
             (w for lim, w in WHO if staff < lim), "руководитель инфраструктуры/платформы или CIO")
         notes = [r.get("Пометка")] if r.get("Пометка") else []
+        devops = any(DEVOPS_TITLE.search(t) for t in titles)
+        r["DevOps-фильтр"] = "да" if devops else "нет"
         if staff is None:
-            if r["Балл без размера"] >= 5:
-                r["Волна"], r["Лист"] = "", "Ручная проверка"
-                notes.append("размер не определён, балл без размера ≥ 5")
+            # размер пользователь увидит сам, когда будет искать ЛПРа (правило 13.10.2026)
+            if devops and r["Балл без размера"] >= 4:
+                wave = 2
+                notes.append("размер не проверен")
             else:
-                r["Волна"], r["Лист"] = 3, "Волна 3"
+                wave = 3
                 notes.append("размер не определён")
         elif staff < 50:
-            r["Волна"], r["Лист"] = 3, "Волна 3"
+            wave = 3
             notes.append("микро/малая")
         else:
-            r["Волна"] = 1 if r["Балл"] >= 7 else 2 if r["Балл"] >= 4 else 3
-            r["Лист"] = f"Волна {r['Волна']}"
+            wave = 1 if r["Балл"] >= 7 else 2 if r["Балл"] >= 4 else 3
+        if not devops:
+            if DEVOPS_STACK.search(r.get("Стек") or ""):
+                wave = max(wave, 2)                # сисадмин с Ansible/Terraform/Docker/k8s
+                notes.append("сисадмин, DevOps-стек")
+            else:
+                wave = 3
+                notes.append("сисадмин")
+        r["Волна"], r["Лист"] = wave, f"Волна {wave}"
         if r["Исключение"] == "посредник?":
             r["Лист"] = "Ручная проверка"
             notes.append("посредник?")
@@ -811,16 +856,18 @@ def step3():
     conf = Counter(r.get("Уверенность сопоставления") for r in rows
                    if r.get("Уверенность сопоставления"))
     print("уверенность сопоставления:", dict(conf))
-    manual = [r for r in rows if r["Лист"] == "Ручная проверка"]
-    print("ручная проверка: размер неизвестен и балл без размера ≥ 5 —",
-          sum("размер не определён" in r["Пометка"] for r in manual),
-          "| посредник? —", sum("посредник?" in r["Пометка"] for r in manual))
-    w1 = sorted((r for r in rows if r["Лист"] == "Волна 1"),
-                key=lambda r: (-r["Балл"], as_date(r.get("Самая старая открытая"))))
-    print("\nтоп-30 волны 1:")
-    for r in w1[:30]:
-        print(f"  {r['Балл']:2d} | {r['Компания'][:30]:30s} | {r['Численность'] or '—':>5} чел. | "
-              f"{r['Оффер'][:34]:34s} | {r['Зацепка'][:50]}")
+    w3 = Counter(n for r in rows if r["Лист"] == "Волна 3"
+                 for n in ("сисадмин", "размер не определён", "микро/малая")
+                 if n in r["Пометка"].split("; "))
+    print("волна 3 по пометкам:", dict(w3))
+    for wave in ("Волна 1", "Волна 2"):
+        ws = sorted((r for r in rows if r["Лист"] == wave),
+                    key=lambda r: (-r["Балл"], as_date(r.get("Самая старая открытая"))))
+        print(f"\n{wave} ({len(ws)}):")
+        for r in ws:
+            print(f"  {r['Балл']:2d} | {r['Компания'][:28]:28s} | {r['Численность'] or '—':>5} | "
+                  f"{r['Почему'][:70]:70s} | {r['Оффер'][:30]:30s} | {r['Зацепка'][:45]}"
+                  + (f" | {r['Пометка']}" if r["Пометка"] else ""))
     print(f"результат: {WORK / 'step3.json'}")
 
 
