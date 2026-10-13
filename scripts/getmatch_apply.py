@@ -6,8 +6,8 @@
 --limit сколько откликов максимум за этот запуск (по умолчанию DAILY)
 
 Как устроено. Вакансии берём из API getmatch (/api/offers) из-под входа
-профиля: специальность DevOps и SRE, грейд Middle и Senior, удалёнка или
-Москва — как поиск на hh. В специальность getmatch кладёт и чужие должности
+профиля: специальность DevOps и SRE, грейд Middle и Senior, только
+удалённые вакансии. В специальность getmatch кладёт и чужие должности
 («Начальник отдела», «Product Owner»), поэтому дальше фильтр по названию и
 стоп-лист аккаунта (blacklist.txt). Отклик — форма вакансии: «Откликнуться»,
 письмо из letter.txt аккаунта, «Отправить отклик». Зарплату getmatch
@@ -23,8 +23,9 @@ import sys
 
 BASE = "/Users/mr_macbook/Documents"
 ACCS = {"hh": "hh_autoreply", "hh2": "hh_autoreply_2", "hh3": "hh_autoreply_3"}
+# только удалёнка: l=remote. Москву (офис и гибрид) убрали 13.10.2026.
 QUERY = ("/api/offers?sa=any&pa=all&sp=dev_ops&sp=sre&se=middle&se=senior"
-         "&l=remote&l=moscow&limit=50&offset={offset}&p={page}")
+         "&l=remote&limit=50&offset={offset}&p={page}")
 TITLE_RE = re.compile(
     r"devops|dev ops|\bsre\b|site reliab|platform|kubernetes|k8s|инфраструктур"
     r"|внедрени|linux|cloud|облак|mlops|observability|мониторинг", re.I)
