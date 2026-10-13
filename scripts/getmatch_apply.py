@@ -248,7 +248,9 @@ def take_blank(short):
             if st == "skip":
                 db.execute("UPDATE gm_pending SET status='skip' WHERE id=?", (vid,))
                 skipped += 1
-            elif st == "approved" and ans:
+            # Написанный ответ уже и есть согласие: в шапке части 5 про статус
+            # approved ничего не сказано, и ответ с needs_input не терялся бы зря.
+            elif ans:
                 db.execute("UPDATE gm_pending SET answer=?, status='answered' WHERE id=?",
                            (ans, vid))
                 got += 1
