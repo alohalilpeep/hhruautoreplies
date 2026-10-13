@@ -658,10 +658,52 @@ def open_profile():
     return r["data"]["ws"]
 
 
+# Закрывать ли профиль BitBrowser после работы. По умолчанию нет: у тарифа
+# BitBrowser суточный лимит на открытия профилей, и прогоны с проверками
+# выбирали его к вечеру («The number of browser opened today reached its
+# limit»). Открытый профиль скрипты подхватывают, не тратя новое открытие.
+CLOSE_PROFILE = os.getenv("CLOSE_PROFILE", "false").strip().lower() in ("1", "true", "yes")
+
+
 def close_profile():
+    """Конец работы с профилем: закрыть его или только убрать вкладки."""
+    if CLOSE_PROFILE:
+        try:
+            requests.post(f"{BIT_API}/browser/close", json={"id": PROFILE_ID},
+                          headers=_headers(), timeout=30)
+        except Exception:
+            pass
+        return
+    tidy_profile()
+
+
+def tidy_profile():
+    """Оставить в профиле одну пустую вкладку, остальные закрыть.
+
+    Работает через служебный HTTP-интерфейс браузера, без Playwright: часть
+    скриптов вызывает close_profile, ещё не выйдя из sync_playwright, а
+    второе подключение изнутри первого невозможно. Пустая вкладка
+    открывается до закрытия остальных, чтобы окно не закрылось вместе с
+    последней.
+    """
     try:
-        requests.post(f"{BIT_API}/browser/close", json={"id": PROFILE_ID},
-                      headers=_headers(), timeout=30)
+        ports = requests.post(f"{BIT_API}/browser/ports", json={},
+                              headers=_headers(), timeout=15).json().get("data") or {}
+        port = ports.get(PROFILE_ID)
+        if not port:
+            return
+        cdp = f"http://127.0.0.1:{port}"
+        keep = requests.put(f"{cdp}/json/new?about:blank", timeout=10).json().get("id")
+        # Закрытие асинхронное, и вкладка, которая ещё грузится, иногда
+        # переживает первый проход. Поэтому смотрим список заново.
+        for _ in range(3):
+            rest = [t for t in requests.get(f"{cdp}/json/list", timeout=10).json()
+                    if t.get("type") == "page" and t.get("id") != keep]
+            if not rest:
+                break
+            for t in rest:
+                requests.get(f"{cdp}/json/close/{t['id']}", timeout=10)
+            time.sleep(1)
     except Exception:
         pass
 

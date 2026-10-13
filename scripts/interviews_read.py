@@ -5,6 +5,7 @@
 кнопки быстрых ответов hh, а не сообщения работодателя.
 """
 import re, sys, requests, pathlib
+from tidy_tabs import tidy
 from playwright.sync_api import sync_playwright
 
 API = "http://127.0.0.1:54345"
@@ -71,4 +72,4 @@ with sync_playwright() as p:
         except Exception as e:
             print("ошибка:", type(e).__name__, str(e)[:100])
         if opened:
-            requests.post(f"{API}/browser/close", json={"id": pid})
+            tidy(pid)
