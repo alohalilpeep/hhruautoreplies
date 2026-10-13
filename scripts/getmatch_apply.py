@@ -131,6 +131,12 @@ def fetch_offers(page, query=None):
             return out
 
 
+def has_questions(offer):
+    """Письмо обязательно или в подсказке к нему вопросы работодателя."""
+    ph = offer.get("cover_letter_placeholder") or ""
+    return bool(offer.get("cover_letter_required")) or "?" in ph
+
+
 def offer_state(page, offer_id):
     """Есть ли у вакансии отклик — спрашиваем API заново."""
     d = page.evaluate("u => fetch(u, {credentials: 'include'}).then(r => r.json())",
@@ -189,7 +195,8 @@ def main(short, dry, limit):
             print(f"в базе вакансий getmatch: "
                   f"{db.execute('SELECT COUNT(*) FROM gm_vacancies').fetchone()[0]}, "
                   f"компаний: {db.execute('SELECT COUNT(*) FROM gm_companies').fetchone()[0]}")
-            todo, skipped = [], {"уже откликался": 0, "не та должность": 0, "стоп-лист": 0}
+            todo, questions = [], []
+            skipped = {"уже откликался": 0, "не та должность": 0, "стоп-лист": 0}
             for o in offers:
                 comp = (o.get("company") or {}).get("name", "")
                 if o.get("application") or o["id"] in done:
@@ -198,10 +205,20 @@ def main(short, dry, limit):
                     skipped["не та должность"] += 1
                 elif hh.is_blacklisted(comp):
                     skipped["стоп-лист"] += 1
+                elif has_questions(o):
+                    # Работодатель ждёт в письме ответов на свои вопросы. Обычное
+                    # письмо там — отписка: 13.10 так ушёл отклик в Островок
+                    # без ответов на шесть вопросов. Сами такие не отправляем.
+                    skipped.setdefault("вопросы в письме", 0)
+                    skipped["вопросы в письме"] += 1
+                    questions.append(o)
                 else:
                     todo.append(o)
             print(f"getmatch {short}: вакансий {len(offers)}, к отклику {len(todo)}, "
                   f"пропущено {skipped}; лимит на запуск {left}")
+            for o in questions:
+                print(f"  ⚑ вопросы в письме: {o['position'][:50]} | "
+                      f"{o['company'].get('name', '')[:25]} | {o['url']}")
             if dry:
                 if todo:                     # проверка, что API карточки отвечает
                     st = page.evaluate("u => fetch(u, {credentials: 'include'})"
