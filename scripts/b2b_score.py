@@ -1460,6 +1460,42 @@ def enrich_new(rows):
     V4_CACHE.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
 
 
+GOOGLE_CACHE = WORK / "google_cache.json"
+# ИНН агрегаторов вакансий: выпадали у многих разных компаний (поиск 14.10.2026)
+AGG_INN = {"9710095807", "333412951657", "9704271170"}
+
+
+def apply_google(rows):
+    """ИНН из выдачи Google (scripts/google_inn.py) для строк без ИНН.
+    Надёжные: первый проход — «название совпало» или «реестр»; повтор — только «реестр».
+    Остальное идёт с уверенностью «google (проверить)». ИНН агрегаторов и ИНН, выпавший
+    у двух и больше разных компаний, отбрасываем. Возвращает строки, где ИНН появился."""
+    from collections import Counter
+    if not GOOGLE_CACHE.exists():
+        return []
+    g = json.loads(GOOGLE_CACHE.read_text(encoding="utf-8"))
+    shared = {i for i, n in Counter(v["inn"] for v in g.values() if v.get("inn")).items() if n >= 2}
+    key = dadata_key()
+    cache = json.loads(CACHE.read_text(encoding="utf-8")) if CACHE.exists() else {}
+    got = []
+    for r in rows:
+        rec = g.get(r["Компания"])
+        if r.get("ИНН") or not rec or not rec.get("inn"):
+            continue
+        if rec["inn"] in AGG_INN or rec["inn"] in shared:
+            continue
+        sure = rec["match"] == "реестр" if rec.get("retried") else \
+            rec["match"] in ("название совпало", "реестр")
+        code = rec.get("okved") or ""
+        r.update({"ИНН": rec["inn"], "Юрлицо": rec["legal"], "ОКВЭД код": code,
+                  "ОКВЭД расшифровка": okved_name(cache, key, code), "Регион": rec.get("region") or "",
+                  "Численность": rec.get("staff"), "Доходы (ФНС)": rec.get("income"),
+                  "Уверенность сопоставления": "google" if sure else "google (проверить)",
+                  "Кандидаты (топ-3)": ""})
+        got.append(r)
+    return got
+
+
 def step_v4():
     from collections import Counter
     from openpyxl import Workbook
@@ -1484,6 +1520,21 @@ def step_v4():
           f"{len(coll) - len(new)}, новых {len(new)}")
     enrich_new(new)
     rows = base + list(new.values())
+    google = apply_google(rows)
+    newly = 0
+    for r in google:                               # у строк базы дофильтр после ИНН из Google
+        if id(r) in {id(x) for x in new.values()}:
+            continue                               # новые пройдут дофильтр ниже
+        if not r.get("Исключение"):
+            r["Исключение"] = post_filter(r)
+            if r["Исключение"] and r["Исключение"] != "посредник?":
+                r["Лист"] = "Исключены"
+                newly += 1
+            elif r["Исключение"] == "посредник?":
+                r["Лист"] = "Ручная проверка"
+    from collections import Counter as _C
+    print(f"ИНН из Google: {len(google)} — {dict(_C(r['Уверенность сопоставления'] for r in google))}"
+          f"; у строк базы после дофильтра исключено {newly}")
     for r in new.values():                         # дофильтр, как в step3, для новых
         manual = MANUAL.get(low(r["Компания"]), {})
         if manual.get("unmatch"):
