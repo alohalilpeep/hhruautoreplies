@@ -731,6 +731,10 @@ MANUAL = {
     "ооо клауд солюшенс": {"note": "проверить: облако/интегратор? сайт не найден"},
     # авто-сопоставление взяло региональную франшизу «2ГИС.ПЕНЗА», а не головное юрлицо
     "2гис": {"unmatch": True, "note": "ИНН снят: найдено юрлицо франшизы 2ГИС.ПЕНЗА"},
+    # v4: сбор hh3 — дилер, однофамилец и региональное юрлицо вместо головных
+    "зао консультантплюс": {"unmatch": True},
+    "центр финансовых технологий": {"unmatch": True},
+    "ооо мой горящий тур": {"unmatch": True},
 }
 
 
@@ -1048,7 +1052,7 @@ def write_sheet(wb, title, rows, cols, manual_col="Волна вручную",
                 cell.number_format = "#,##0"
             elif c == manual_col:
                 cell.fill = manual
-            elif c in ("Сайт", "Ссылка на вакансию") and cell.value:
+            elif c in ("Сайт", "Ссылка на вакансию", "Работодатель на hh") and cell.value:
                 cell.hyperlink = cell.value
             elif c in FLAGS:
                 cell.alignment = Alignment(horizontal="center", vertical="top")
@@ -1386,6 +1390,216 @@ def step_v3():
     print(f"файл: {OUT_V3}")
 
 
+# ---------- v4: база DevOps-вакансий + сбор hh3 (collected_vacancies), правила v3 ----------
+OUT_V4 = EXPORTS / "b2b_v4.xlsx"
+COLLECT_DB = Path("/Users/mr_macbook/Documents/hh_autoreply_3/hh_responses.db")
+V4_CACHE = WORK / "step_v4_new.json"
+COLS_V4 = (["Компания", "Приоритет"] + FLAGS_V3 +
+           ["Приоритет вручную", "Метки", "Горячий", "Сегмент", "Численность", "ОКВЭД",
+            "Доходы (ФНС)", "Вакансий", "Сайт", "Работодатель на hh", "Ссылка на вакансию",
+            "ИНН", "Юрлицо", "Уверенность ИНН"] + LPR_COLS)
+
+
+def collected_companies():
+    """Компании из сбора hh3: {ключ: строка в формате step3}."""
+    import sqlite3
+    db = sqlite3.connect(COLLECT_DB)
+    out = {}
+    for company, title, url, emp, tags in db.execute(
+            "SELECT company, title, url, employer_url, tags FROM collected_vacancies "
+            "WHERE company IS NOT NULL AND company <> '' ORDER BY first_seen"):
+        k = dedupe_key(company)
+        r = out.setdefault(k, {"Компания": company, "_все названия": [], "_метки": set(),
+                               "Вакансий": 0, "Ссылка на вакансию": url,
+                               "Работодатель на hh": emp, "Исключение": ""})
+        r["Вакансий"] += 1
+        if title and title not in r["_все названия"]:
+            r["_все названия"].append(title)
+        r["_метки"].update((tags or "").split())
+        r["Работодатель на hh"] = r["Работодатель на hh"] or emp
+    return out
+
+
+def enrich_new(rows):
+    """Шаг 1 (без «не DevOps») + DaData + fns.db для компаний, которых нет в базе.
+    Результат кэшируется в step_v4_new.json, повторный запуск API не дёргает."""
+    import sqlite3
+    done = json.loads(V4_CACHE.read_text(encoding="utf-8")) if V4_CACHE.exists() else {}
+    key = dadata_key()
+    cache = json.loads(CACHE.read_text(encoding="utf-8")) if CACHE.exists() else {}
+    db = sqlite3.connect(FNS_DB)
+    for i, (k, r) in enumerate(rows.items(), 1):
+        if k in done:
+            r.update(done[k])
+            continue
+        # названия вакансий не передаём: правило «не DevOps» для этих запросов не годится
+        excl = classify(r["Компания"], [])
+        best, conf, top, tried = None, "ручная", [], []
+        for q in queries(r["Компания"]):
+            res = cached(cache, "party10", q, lambda: requests_post(
+                key, "suggest/party", {"query": q, "count": 10}))
+            tried.append(q)
+            best, conf, top, _ = match(q, (res or {}).get("suggestions") or [], db)
+            if best or top:
+                break
+        add = {"Исключение": excl, "Уверенность сопоставления": conf, "ИНН": "", "Юрлицо": "",
+               "ОКВЭД код": "", "ОКВЭД расшифровка": "", "Регион": "", "Численность": None,
+               "Доходы (ФНС)": None,
+               "Кандидаты (топ-3)": "\n".join(describe(c) for c in top) if not best else ""}
+        if best:
+            d = best["s"]["data"]
+            code = d.get("okved") or ""
+            add.update({"ИНН": d.get("inn"), "Юрлицо": best["s"]["value"], "ОКВЭД код": code,
+                        "ОКВЭД расшифровка": okved_name(cache, key, code), "Регион": region(d),
+                        "Численность": best["staff"], "Доходы (ФНС)": best["income"]})
+        r.update(add)
+        done[k] = add
+        if i % 50 == 0:
+            V4_CACHE.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
+            print(f"  … {i}/{len(rows)}", flush=True)
+    V4_CACHE.write_text(json.dumps(done, ensure_ascii=False), encoding="utf-8")
+
+
+def step_v4():
+    from collections import Counter
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    base = json.loads((WORK / "step3.json").read_text(encoding="utf-8"))
+    by_key = {}
+    for r in base:
+        r["_метки"] = {"#devops"}
+        r["Вакансий"] = r.get("Вакансий инфраструктуры")
+        by_key.setdefault(dedupe_key(r["Компания"]), r)
+    coll = collected_companies()
+    new = {}
+    for k, c in coll.items():
+        if k in by_key:                            # уже в базе: только метки и счётчик
+            b = by_key[k]
+            b["_метки"] |= c["_метки"]
+            b["Вакансий"] = (b.get("Вакансий") or 0) + c["Вакансий"]
+            b["Работодатель на hh"] = c["Работодатель на hh"]
+        else:
+            new[k] = c
+    print(f"база: {len(base)}, сбор hh3: {len(coll)} компаний, из них уже в базе "
+          f"{len(coll) - len(new)}, новых {len(new)}")
+    enrich_new(new)
+    rows = base + list(new.values())
+    for r in new.values():                         # дофильтр, как в step3, для новых
+        manual = MANUAL.get(low(r["Компания"]), {})
+        if manual.get("unmatch"):
+            r.update({"ИНН": "", "Юрлицо": "", "ОКВЭД код": "", "Численность": None,
+                      "Доходы (ФНС)": None, "Уверенность сопоставления": "ручная"})
+        r["Исключение"] = (manual["Исключение"] + " (решение вручную)" if "Исключение" in manual
+                           else post_filter(r))
+        if r["Исключение"] and r["Исключение"] != "посредник?":
+            r["Лист"] = "Исключены"
+        elif r["Исключение"] == "посредник?":
+            r["Лист"] = "Ручная проверка"
+        else:
+            r["Лист"] = "Волна 3"                  # любая волна: дальше всё решает v3-приоритет
+
+    manual_old = old_manual([OUT, OUT_V2, OUT_V3, OUT_V4])
+    for r in rows:
+        r["_staff_v2"], seg, flags, r["Приоритет"] = flags_v3(r)
+        r[FLAGS_V3[0]], r[FLAGS_V3[1]], r[FLAGS_V3[2]] = flags
+        r["Сегмент"] = f"{seg[0]}: {seg[1]}" if seg else ""
+        r["Метки"] = " ".join(sorted(r["_метки"]))
+        r["Горячий"] = "да" if "#горячий" in r["_метки"] else ""
+        m = manual_old.get(r["Компания"], {})
+        v = m.get("Приоритет вручную") or m.get("Волна вручную")
+        r["_manual"] = (f"волна {v} (v1)" if v is not None and str(v) in ("1", "2", "3") else v)
+        r["_lpr"] = {k: m[k] for k in LPR_COLS if k in m}
+        r["Лист v4"] = (r["Приоритет"] if r.get("Лист") in ("Волна 1", "Волна 2", "Волна 3")
+                        else r.get("Лист"))
+    order = lambda r: (r["Горячий"] != "да", r["_staff_v2"] is None,  # noqa: E731
+                       r["_staff_v2"] or 0, r["Компания"])
+    sheets = {k: sorted((r for r in rows if r.get("Лист v4") == k), key=order)
+              for k in ("A", "B", "C", "Ручная проверка")}
+    sheets["Исключены"] = sorted((r for r in rows if r.get("Лист v4") == "Исключены"),
+                                 key=lambda r: (r.get("Исключение") or "", r["Компания"]))
+
+    WIDTH.update({"Сегмент": 34, "Метки": 30, "Работодатель на hh": 30})
+    FLAGS.extend(f for f in FLAGS_V3 + ["Горячий"] if f not in FLAGS)
+    wb = Workbook()
+    wb.remove(wb.active)
+    for k in ("A", "B", "C", "Ручная проверка", "Исключены"):
+        cols = COLS_V4 if k != "Исключены" else (
+            ["Компания", "Исключение"] + COLS_V4[1:COLS_V4.index("Уверенность ИНН") + 1]
+            + ["Кандидаты ИНН"] + COLS_V4[COLS_V4.index("Уверенность ИНН") + 1:])
+        if k == "B":
+            cols = [c for c in cols if c != "Сегмент"]
+        ws = write_sheet(wb, k, sheets[k], cols, manual_col="Приоритет вручную",
+                         manual_opts='"A,B,C,исключить"')
+        for i, r in enumerate(sheets[k], 2):
+            for j, c in enumerate(cols, 1):
+                if c == "Приоритет вручную" and r["_manual"] is not None:
+                    ws.cell(i, j, r["_manual"])
+                elif c in r["_lpr"]:
+                    ws.cell(i, j, r["_lpr"][c])
+    how = [
+        ("Источники компаний", ""),
+        ("#devops", "база: компании с DevOps/SRE-вакансиями из откликов hh.ru и getmatch"),
+        ("#бэкенд", "сбор hh3: backend/fullstack 3–6 и 6+, в описании k8s, docker-compose, CI/CD, "
+                    "GitLab CI, инфраструктура"),
+        ("#стабильность", "сбор hh3: техподдержка L2/L3 и эксплуатация, в описании разбор инцидентов, "
+                          "дежурства, логи, мониторинг + стек"),
+        ("#продукт", "сбор hh3: CTO, технический директор, руководители разработки, head of engineering"),
+        ("#внутренний_ит", "сбор hh3: директор по ИТ, IT-директор, CIO"),
+        ("#техлид", "сбор hh3: техлиды и тимлиды (широкий запрос)"),
+        ("#горячий", "сбор hh3: техлид сам отвечает за CI/CD, k8s, деплой или инфраструктуру "
+                     "(узкий запрос) — в приоритете идёт первым"),
+        ("Склейка", "одна строка на компанию: метки всех её вакансий; у компании из базы данные "
+                    "ИНН/ФНС берутся из базы, сбор добавляет метки и вакансии"),
+        ("Новые из сбора", "шаг 1 без правила «не DevOps», ИНН через DaData (без сайтов), "
+                           "численность и доходы из ФНС, дофильтр по ОКВЭД/численности/группам"),
+        ("", ""),
+    ] + [
+        ("Флаги (да / нет / ?)", ""),
+        ("≤500 чел", "численность по ФНС ≤ 500; нет данных или в юрлице < 10 человек → «?»"),
+        ("ОКВЭД из списка", "основной ОКВЭД есть в таблице ниже; ИНН не найден → «?»"),
+        ("Доходы ≤3 млрд", "доходы по ФНС ≤ 3 000 000 000 ₽; нет данных → «?»"),
+        ("", ""),
+        ("Приоритет", ""),
+        ("A", "все три флага «да»"),
+        ("B", "два «да», третий «нет» или «?»"),
+        ("C", "остальные"),
+        ("Сортировка", "внутри приоритета: сначала #горячий, затем по численности по возрастанию, "
+                       "неизвестная в конце"),
+        ("Приоритет вручную", "если заполнен — главнее расчётного (A / B / C / исключить)"),
+        ("", ""),
+        ("ОКВЭД → сегмент", ""),
+    ] + [(pref, f"[{group}] {who}") for pref, group, who, _ in OKVED_V3 if pref != "62.0"] \
+      + [("", "")] + HOW_V2[-9:]
+    ws = wb.create_sheet("Как считалось")
+    for a, b in how:
+        ws.append([a, b])
+        if a and not b:
+            ws.cell(ws.max_row, 1).font = Font(bold=True)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 120
+    for row in ws.iter_rows():
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    wb.save(OUT_V4)
+
+    print("листы:")
+    for k, v in sheets.items():
+        print(f"  {k:16s} {len(v)}  (горячих {sum(r['Горячий'] == 'да' for r in v)})")
+    for k in ("A", "B", "C"):
+        print(f"  {k} по меткам:", dict(Counter(t for r in sheets[k] for t in r["_метки"]).most_common()))
+    print("исключены:", dict(Counter((r.get("Исключение") or "").split(" (")[0]
+                                     for r in sheets["Исключены"]).most_common()))
+    print("уверенность ИНН у новых:", dict(Counter(r.get("Уверенность сопоставления")
+                                                   for r in new.values())))
+    print("перенесено ручных записей:", sum(1 for r in rows if r["_manual"] is not None or r["_lpr"]))
+    print("\nпервые 30 из A:")
+    for r in sheets["A"][:30]:
+        inc = f"{r['Доходы (ФНС)'] / 1e6:,.0f} млн".replace(",", " ")
+        print(f"  {r['Компания'][:30]:30s} | {r['Численность']:>4} | {r['ОКВЭД код']:8s} | "
+              f"{inc:>9s} | {r['Метки']}")
+    print(f"файл: {OUT_V4}")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["step1"]:
@@ -1404,5 +1618,7 @@ if __name__ == "__main__":
         step_v2()
     elif a[:1] == ["v3"]:
         step_v3()
+    elif a[:1] == ["v4"]:
+        step_v4()
     else:
         print(__doc__)
