@@ -36,6 +36,7 @@ def main():
         raise SystemExit(f"в {sys.argv[2]} пустой SEARCH_URL")
     pages = int(conf.get("COLLECT_PAGES") or 40)
     query = sys.argv[2]
+    tag = conf.get("TAG", "").strip()              # метка сегмента: #продукт, #горячий …
 
     os.chdir(acc)
     sys.path.insert(0, str(acc))
@@ -48,6 +49,9 @@ def main():
         id TEXT PRIMARY KEY, query TEXT, url TEXT, title TEXT, company TEXT,
         employer_url TEXT, salary TEXT, experience TEXT, address TEXT, work_format TEXT,
         first_seen TEXT, last_seen TEXT)""")
+    cols = {r[1] for r in db.execute("PRAGMA table_info(collected_vacancies)")}
+    if "tags" not in cols:                         # метки появились позже таблицы
+        db.execute("ALTER TABLE collected_vacancies ADD COLUMN tags TEXT")
     db.commit()
     known = {r[0] for r in db.execute("SELECT id FROM collected_vacancies")}
 
@@ -87,16 +91,23 @@ def main():
                     if vid not in known:
                         new += 1
                         page_new += 1
+                    # одна вакансия может прийти из нескольких запросов: метки копятся
+                    # через пробел, query остаётся первым, кто её нашёл
                     db.execute(
-                        "INSERT INTO collected_vacancies VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                        "INSERT INTO collected_vacancies (id, query, url, title, company, "
+                        " employer_url, salary, experience, address, work_format, first_seen, "
+                        " last_seen, tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
                         "ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, "
-                        " salary = excluded.salary, title = excluded.title",
+                        " salary = excluded.salary, title = excluded.title, "
+                        " tags = CASE WHEN excluded.tags = '' OR instr(' ' || COALESCE(tags, '') "
+                        "   || ' ', ' ' || excluded.tags || ' ') THEN tags "
+                        "   ELSE trim(COALESCE(tags, '') || ' ' || excluded.tags) END",
                         (vid, query, f"https://hh.ru/vacancy/{vid}", info.get("title"),
                          info.get("company"),
                          ("https://hh.ru" + href.split("?")[0]) if href and href.startswith("/")
                          else (href or "").split("?")[0],
                          info.get("salary"), info.get("experience"), info.get("address"),
-                         info.get("work_format"), now, now))
+                         info.get("work_format"), now, now, tag))
                 db.commit()
                 print(f"страница {n}: карточек {total}, новых {page_new}", flush=True)
                 if total < 20:                     # последняя страница выдачи
@@ -107,9 +118,10 @@ def main():
 
     companies = db.execute(
         "SELECT company, COUNT(*) FROM collected_vacancies WHERE query = ? "
-        "GROUP BY company ORDER BY COUNT(*) DESC", (query,)).fetchall()
+        "   OR (? <> '' AND instr(' ' || COALESCE(tags, '') || ' ', ' ' || ? || ' ')) "
+        "GROUP BY company ORDER BY COUNT(*) DESC", (query, tag, tag)).fetchall()
     print(f"\nостановка: {stop or f'прошёл {pages} страниц'}")
-    print(f"вакансий в этом проходе: {len(seen)}, новых: {new}")
+    print(f"вакансий в этом проходе: {len(seen)}, новых: {new}" + (f", метка {tag}" if tag else ""))
     print(f"всего по запросу: {sum(c for _, c in companies)} вакансий, {len(companies)} компаний")
     for name, cnt in companies[:15]:
         print(f"  {cnt:3d}  {name}")
