@@ -683,6 +683,18 @@ GROUP_CHILD = {
 }
 
 
+# Ручные решения пользователя по конкретным компаниям (14.10.2026), ключ — low(«Компания»).
+MANUAL = {
+    "честный знак.рф": {"Исключение": "гос"},
+    "бкс it & digital": {"Исключение": "гигант"},
+    "бюро 1440": {"Исключение": "гигант"},
+    "rubytech": {"Исключение": "посредник"},
+    "ооо отр": {"wave": 3, "note": "господрядчик"},
+    "ооо эвотор": {"wave": 2, "size_unknown": True, "note": "размер не проверен"},
+    "ооо клауд солюшенс": {"note": "проверить: облако/интегратор? сайт не найден"},
+}
+
+
 def group_of(r):
     if r.get("ИНН") in GROUP_CHILD:
         return GROUP_CHILD[r["ИНН"]]
@@ -749,7 +761,7 @@ def score(r):
     Возвращает (балл, балл без размера, «почему»)."""
     from datetime import date
     titles = r.get("_все названия") or []
-    staff = r.get("Численность")
+    staff = r.get("_размер")
     pts, why, size_pts = 0, [], 0
     old = as_date(r.get("Самая старая открытая"))
     if old and (date.fromisoformat(TODAY) - date.fromisoformat(old)).days >= 21:
@@ -807,15 +819,21 @@ def step3():
         src = WORK / "step2.json"
     rows = json.loads(src.read_text(encoding="utf-8"))
     for r in rows:
-        r["Исключение"] = post_filter(r)
+        manual = MANUAL.get(low(r["Компания"]), {})
+        r["Исключение"] = (manual["Исключение"] + " (решение вручную)" if "Исключение" in manual
+                           else post_filter(r))
         if r["Исключение"] and r["Исключение"] != "посредник?":
             r["Волна"] = ""
             r["Лист"] = "Исключены"
             continue
         titles = r.get("_все названия") or []
         r["Оффер"], r["Запасной оффер"], r["Зацепка"], r["_триггер"] = offer(titles, r.get("Стек"))
-        r["Балл"], r["Балл без размера"], r["Почему"] = score(r)
+        # < 10 человек в юрлице — скорее не то юрлицо группы: размер считаем неизвестным
         staff = r.get("Численность")
+        if (staff is not None and staff < 10) or manual.get("size_unknown"):
+            staff = None
+        r["_размер"] = staff
+        r["Балл"], r["Балл без размера"], r["Почему"] = score(r)
         r["Кого искать"] = "CTO" if staff is None else next(
             (w for lim, w in WHO if staff < lim), "руководитель инфраструктуры/платформы или CIO")
         notes = [r.get("Пометка")] if r.get("Пометка") else []
@@ -841,6 +859,11 @@ def step3():
             else:
                 wave = 3
                 notes.append("сисадмин")
+        if "wave" in manual:
+            wave = manual["wave"]
+            notes = [n for n in notes if n not in ("размер не определён", "размер не проверен")]
+        if manual.get("note"):
+            notes.append(manual["note"])
         r["Волна"], r["Лист"] = wave, f"Волна {wave}"
         if r["Исключение"] == "посредник?":
             r["Лист"] = "Ручная проверка"
@@ -871,6 +894,173 @@ def step3():
     print(f"результат: {WORK / 'step3.json'}")
 
 
+# ---------- шаг 5: b2b_scored.xlsx ----------
+OUT = EXPORTS / "b2b_scored.xlsx"
+LPR_COLS = ["ЛПР имя", "ЛПР должность", "Telegram ЛПР", "LinkedIn/почта", "Контакт рекрутера",
+            "Статус", "Дата касания", "Следующий шаг", "Комментарий"]
+COLS = ["Компания", "Волна", "Волна вручную", "Балл", "Почему", "Пометка", "Оффер",
+        "Запасной оффер", "Зацепка", "Кого искать", "Сайт", "ИНН", "Юрлицо", "Уверенность ИНН",
+        "ОКВЭД", "Численность", "Доходы (ФНС)", "Регион", "Инфра-вакансий", "Висит с", "Вакансии",
+        "Стек", "Зарплата от", "Зарплата до", "Ссылка на вакансию"] + LPR_COLS
+WIDTH = {"Компания": 30, "Почему": 42, "Пометка": 34, "Оффер": 28, "Запасной оффер": 28,
+         "Зацепка": 36, "Кого искать": 26, "Сайт": 24, "Юрлицо": 30, "ОКВЭД": 34, "Регион": 20,
+         "Вакансии": 48, "Стек": 34, "Ссылка на вакансию": 30, "Исключение": 26,
+         "Кандидаты ИНН": 60, "Комментарий": 30, "Следующий шаг": 20}
+WRAP = {"Вакансии", "Почему", "Пометка", "Кандидаты ИНН"}
+
+HOW = [
+    ("Баллы (шаг 3)", ""),
+    ("+3", "самая старая открытая инфра-вакансия висит 21+ день (от 2026-10-13)"),
+    ("+3", "ищут лида или первого DevOps: head, lead, руководитель, тимлид, team lead, tech lead, "
+           "архитектор, «единственный»"),
+    ("+2", "2+ инфра-вакансии при численности до 1000"),
+    ("+2", "численность 50–1000"),
+    ("+1", "указана зарплата, верхняя граница ≥ 300 000"),
+    ("+1", "в вакансиях или стеке есть явный триггер под оффер"),
+    ("−3", "все инфра-вакансии junior / стажёр / trainee / ученик"),
+    ("−2", "юрлицо не РФ: подтверждено на сайте или ТОО / LLC / Ltd / ЧК / Inc / B.V. в названии"),
+    ("−2", "ОКВЭД 64.19 (банк) при численности > 1000"),
+    ("", ""),
+    ("Волны", ""),
+    ("1", "балл ≥ 7"),
+    ("2", "балл 4–6"),
+    ("3", "балл ниже 4"),
+    ("DevOps-фильтр", "в волны 1–2 только если хотя бы в одном названии вакансии есть devops, sre, "
+                      "site reliability, platform engineer, платформ, kubernetes, k8s, devsecops, "
+                      "mlops, ci/cd, релиз-инженер, «инфраструктуры и автоматизации»; иначе волна 3 "
+                      "«сисадмин», а при Ansible / Terraform / Docker / Kubernetes в стеке — максимум 2"),
+    ("Размер неизвестен", "размерные баллы = 0; прошла DevOps-фильтр и балл без размера ≥ 4 → "
+                          "волна 2 «размер не проверен», иначе волна 3 «размер не определён». "
+                          "Юрлицо с численностью < 10 по ФНС считается «размер неизвестен»"),
+    ("Микро/малая", "численность 10–49 → волна 3"),
+    ("Волна вручную", "если заполнена — главнее расчётной"),
+    ("", ""),
+    ("Офферы (шаг 4): главный — с наибольшим числом совпадений (название вакансии ×2, стек ×1)", ""),
+] + [(str(n), f"{name}: " + ", ".join(p.pattern.replace("\\b", "").replace("\\w*", "…")
+                                       .replace(".?", " ").split("|")))
+     for n, name, p in OFFERS] + [
+    ("MLOps", "если других триггеров нет — 9 или 10"),
+    ("Без триггера", "10. Ускорение CI/CD, зацепка — первое название вакансии, +1 не начисляется"),
+    ("", ""),
+    ("Причины исключений", ""),
+    ("гигант", "банки топ-20, телеком и «дочки», бигтех и ритейл, госкорпорации, сырьевые и "
+               "промышленные холдинги, фастфуд; численность > 3000; «гигант (группа …)» — дочка "
+               "крупной группы"),
+    ("гос", "ГКУ, ГУП, ФГУП, ГАУ, ФКУ, ФБУН, министерства, НИИ, оборонные НПО, метрополитен, "
+            "Гознак; ОКВЭД 84"),
+    ("посредник", "ИП и ФИО, кадровые агентства, аутсорс/аутстафф, интеграторы; ОКВЭД 78"),
+    ("посредник?", "интеграция, консалтинг, solutions, студии; ОКВЭД 70.22 — лист «Ручная проверка»"),
+    ("инфра-вендор", "облака, хостинги, ЦОДы, anti-DDoS, ИБ-вендоры, ОС и виртуализация"),
+    ("не DevOps", "все вакансии про поддержку, телефонию или 1С без DevOps-слов"),
+    ("(решение вручную)", "исключено по решению от 14.10.2026"),
+    ("", ""),
+    ("Источники", "вакансии — hh.ru и getmatch; ИНН — DaData и сайты компаний; численность и "
+                  "доходы — открытые данные ФНС (sshr, revexp) на 31.12.2025"),
+]
+
+
+def cell_value(r, col):
+    if col == "ОКВЭД":
+        return " ".join(x for x in (r.get("ОКВЭД код"), r.get("ОКВЭД расшифровка")) if x)
+    if col == "Инфра-вакансий":
+        return r.get("Вакансий инфраструктуры")
+    if col == "Висит с":
+        return as_date(r.get("Самая старая открытая")) or None
+    if col == "Уверенность ИНН":
+        return r.get("Уверенность сопоставления")
+    if col == "Кандидаты ИНН":
+        return r.get("Кандидаты (топ-3)")
+    if col == "Волна вручную":
+        return None
+    if col in LPR_COLS and col != "Telegram ЛПР":
+        return None
+    v = r.get(col)
+    return None if v in ("", None) else v
+
+
+def write_sheet(wb, title, rows, cols):
+    from datetime import date
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+    ws = wb.create_sheet(title)
+    ws.append(cols)
+    for r in rows:
+        vals = [cell_value(r, c) for c in cols]
+        ws.append([date.fromisoformat(v) if c == "Висит с" and v else v for c, v in zip(cols, vals)])
+    head = PatternFill("solid", fgColor="DDE7F3")
+    manual = PatternFill("solid", fgColor="FFF2CC")
+    for i, c in enumerate(cols, 1):
+        h = ws.cell(1, i)
+        h.font, h.fill = Font(bold=True), head
+        h.alignment = Alignment(wrap_text=True, vertical="center")
+        ws.column_dimensions[get_column_letter(i)].width = WIDTH.get(c, 14)
+        for row in ws.iter_rows(min_row=2, min_col=i, max_col=i):
+            cell = row[0]
+            cell.alignment = Alignment(wrap_text=c in WRAP, vertical="top")
+            if c == "Висит с":
+                cell.number_format = "DD.MM.YYYY"
+            elif c in ("Доходы (ФНС)", "Зарплата от", "Зарплата до"):
+                cell.number_format = "#,##0"
+            elif c == "Волна вручную":
+                cell.fill = manual
+            elif c in ("Сайт", "Ссылка на вакансию") and cell.value:
+                cell.hyperlink = cell.value
+    if "Волна вручную" in cols:
+        col = get_column_letter(cols.index("Волна вручную") + 1)
+        dv = DataValidation(type="list", formula1='"1,2,3,исключить"', allow_blank=True)
+        ws.add_data_validation(dv)
+        dv.add(f"{col}2:{col}{max(2, ws.max_row)}")
+    ws.freeze_panes = "B2"
+    ws.auto_filter.ref = ws.dimensions
+    return ws
+
+
+def step_xlsx():
+    from collections import Counter
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    rows = json.loads((WORK / "step3.json").read_text(encoding="utf-8"))
+    by_score = lambda r: (-(r.get("Балл") or 0), as_date(r.get("Самая старая открытая")) or "9")  # noqa: E731
+    sheets = {k: [r for r in rows if r.get("Лист") == k]
+              for k in ("Волна 1", "Волна 2", "Волна 3", "Исключены", "Ручная проверка")}
+    for k in ("Волна 1", "Волна 2", "Ручная проверка"):
+        sheets[k].sort(key=by_score)
+    # волна 3: сверху «размер не определён» с баллом 3 — их пролистать глазами
+    top3 = lambda r: "размер не определён" in (r.get("Пометка") or "") and r.get("Балл") == 3  # noqa: E731
+    sheets["Волна 3"].sort(key=lambda r: (not top3(r),) + by_score(r))
+    sheets["Исключены"].sort(key=lambda r: (r.get("Исключение") or "", r["Компания"]))
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for k in ("Волна 1", "Волна 2", "Волна 3"):
+        write_sheet(wb, k, sheets[k], COLS)
+    write_sheet(wb, "Исключены", sheets["Исключены"],
+                ["Компания", "Исключение"] + [c for c in COLS if c not in
+                 ("Компания", "Волна", "Волна вручную", "Балл", "Почему", "Оффер", "Запасной оффер",
+                  "Зацепка", "Кого искать") and c not in LPR_COLS])
+    write_sheet(wb, "Ручная проверка", sheets["Ручная проверка"],
+                COLS[:6] + ["Кандидаты ИНН"] + COLS[6:])
+    ws = wb.create_sheet("Как считалось")
+    for a, b in HOW:
+        ws.append([a, b])
+        if a and not b:
+            ws.cell(ws.max_row, 1).font = Font(bold=True)
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 120
+    for row in ws.iter_rows():
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    wb.save(OUT)
+
+    print("листы:")
+    for k, v in sheets.items():
+        print(f"  {k:16s} {len(v)}")
+    print("  волна 3 сверху (размер не определён, балл 3):", sum(top3(r) for r in sheets["Волна 3"]))
+    print("исключены:", dict(Counter(r["Исключение"] for r in sheets["Исключены"]).most_common()))
+    print(f"файл: {OUT}")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["step1"]:
@@ -881,5 +1071,7 @@ if __name__ == "__main__":
         step2b()
     elif a[:1] == ["step3"]:
         step3()
+    elif a[:1] == ["xlsx"]:
+        step_xlsx()
     else:
         print(__doc__)
