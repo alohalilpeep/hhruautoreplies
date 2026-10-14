@@ -673,6 +673,7 @@ DEVOPS_STACK = rx(r"ansible", r"terraform", r"docker", r"kubernetes", r"\bk8s\b"
 GROUP_CHILD = {
     "7716971253": "Аэрофлот",                  # АФЛТ-Системс
     "7736249247": "Сбер",                      # Домклик
+    "7804568396": "Сбер",                      # Салют для Бизнеса
     "7729405872": "Татнефть",                  # Банк Зенит
     "7708119944": "Роснефть",                  # ИК Сибинтек
     "ао центр биометрических": "Ростелеком",   # ЦБТ, оператор ЕБС
@@ -692,6 +693,8 @@ MANUAL = {
     "ооо отр": {"wave": 3, "note": "господрядчик"},
     "ооо эвотор": {"wave": 2, "size_unknown": True, "note": "размер не проверен"},
     "ооо клауд солюшенс": {"note": "проверить: облако/интегратор? сайт не найден"},
+    # авто-сопоставление взяло региональную франшизу «2ГИС.ПЕНЗА», а не головное юрлицо
+    "2гис": {"unmatch": True, "note": "ИНН снят: найдено юрлицо франшизы 2ГИС.ПЕНЗА"},
 }
 
 
@@ -820,6 +823,10 @@ def step3():
     rows = json.loads(src.read_text(encoding="utf-8"))
     for r in rows:
         manual = MANUAL.get(low(r["Компания"]), {})
+        if manual.get("unmatch"):
+            r.update({"ИНН": "", "Юрлицо": "", "ОКВЭД код": "", "ОКВЭД расшифровка": "",
+                      "Регион": "", "Численность": None, "Доходы (ФНС)": None,
+                      "Уверенность сопоставления": "ручная"})
         r["Исключение"] = (manual["Исключение"] + " (решение вручную)" if "Исключение" in manual
                            else post_filter(r))
         if r["Исключение"] and r["Исключение"] != "посредник?":
@@ -970,7 +977,7 @@ def cell_value(r, col):
         return r.get("Уверенность сопоставления")
     if col == "Кандидаты ИНН":
         return r.get("Кандидаты (топ-3)")
-    if col == "Волна вручную":
+    if col in ("Волна вручную", "Приоритет вручную"):
         return None
     if col in LPR_COLS and col != "Telegram ЛПР":
         return None
@@ -978,7 +985,8 @@ def cell_value(r, col):
     return None if v in ("", None) else v
 
 
-def write_sheet(wb, title, rows, cols):
+def write_sheet(wb, title, rows, cols, manual_col="Волна вручную",
+                manual_opts='"1,2,3,исключить"'):
     from datetime import date
     from openpyxl.styles import Alignment, Font, PatternFill
     from openpyxl.utils import get_column_letter
@@ -1002,13 +1010,15 @@ def write_sheet(wb, title, rows, cols):
                 cell.number_format = "DD.MM.YYYY"
             elif c in ("Доходы (ФНС)", "Зарплата от", "Зарплата до"):
                 cell.number_format = "#,##0"
-            elif c == "Волна вручную":
+            elif c == manual_col:
                 cell.fill = manual
             elif c in ("Сайт", "Ссылка на вакансию") and cell.value:
                 cell.hyperlink = cell.value
-    if "Волна вручную" in cols:
-        col = get_column_letter(cols.index("Волна вручную") + 1)
-        dv = DataValidation(type="list", formula1='"1,2,3,исключить"', allow_blank=True)
+            elif c in FLAGS:
+                cell.alignment = Alignment(horizontal="center", vertical="top")
+    if manual_col in cols:
+        col = get_column_letter(cols.index(manual_col) + 1)
+        dv = DataValidation(type="list", formula1=manual_opts, allow_blank=True)
         ws.add_data_validation(dv)
         dv.add(f"{col}2:{col}{max(2, ws.max_row)}")
     ws.freeze_panes = "B2"
@@ -1061,6 +1071,135 @@ def step_xlsx():
     print(f"файл: {OUT}")
 
 
+# ---------- v2: приоритет A/B/C по трём флагам (14.10.2026) ----------
+OUT_V2 = EXPORTS / "b2b_v2.xlsx"
+FLAGS = ["≤100 чел", "ОКВЭД разработка", "Доходы ≤1 млрд"]
+COLS_V2 = (["Компания", "Приоритет"] + FLAGS +
+           ["Приоритет вручную", "Численность", "ОКВЭД", "Доходы (ФНС)", "Сайт",
+            "Ссылка на вакансию", "Зацепка", "Пометка", "ИНН", "Юрлицо", "Уверенность ИНН"]
+           + LPR_COLS)
+# пометки старой схемы волн — в v2 не нужны
+OLD_NOTES = {"размер не проверен", "размер не определён", "микро/малая",
+             "размер не определён, балл без размера ≥ 5"}
+HOW_V2 = [
+    ("Кто попадает", "все неисключённые компании (бывшие волны 1–3); исключения по гигантам, "
+                     "госу, посредникам и инфра-вендорам — как раньше, лист «Исключены»"),
+    ("", ""),
+    ("Флаги (да / нет / ?)", ""),
+    ("≤100 чел", "численность по открытым данным ФНС (sshr) на 31.12.2025 ≤ 100. Нет данных или "
+                 "в юрлице < 10 человек → «?» (часто штат в другом юрлице группы)"),
+    ("ОКВЭД разработка", "основной ОКВЭД 62.xx, 63.xx или 58.29; ИНН не найден → «?»"),
+    ("Доходы ≤1 млрд", "доходы по открытым данным ФНС (revexp) за год ≤ 1 000 000 000 ₽; "
+                       "нет данных → «?»"),
+    ("", ""),
+    ("Приоритет", ""),
+    ("A", "все три флага «да»"),
+    ("B", "два «да», третий «нет» или «?»"),
+    ("C", "остальные"),
+    ("Сортировка", "внутри приоритета — по численности по возрастанию, неизвестная численность в конце"),
+    ("Приоритет вручную", "если заполнен — главнее расчётного (A / B / C / исключить)"),
+    ("", ""),
+    ("Ручная проверка", "«посредник?»: интеграция, консалтинг, solutions, студии, ОКВЭД 70.22"),
+    ("", ""),
+] + [x for x in HOW if x[0] in ("Причины исключений", "гигант", "гос", "посредник",
+                                "инфра-вендор", "не DevOps", "(решение вручную)", "Источники")]
+
+
+def flags_v2(r):
+    staff = r.get("Численность")
+    if staff is not None and staff < 10 or MANUAL.get(low(r["Компания"]), {}).get("size_unknown"):
+        staff = None
+    code, income = r.get("ОКВЭД код") or "", r.get("Доходы (ФНС)")
+    f_staff = "?" if staff is None else "да" if staff <= 100 else "нет"
+    f_okved = "?" if not code else "да" if re.match(r"6[23]\.|58\.29", code) else "нет"
+    f_income = "?" if income is None else "да" if income <= 1e9 else "нет"
+    yes = [f_staff, f_okved, f_income].count("да")
+    return staff, (f_staff, f_okved, f_income), "A" if yes == 3 else "B" if yes == 2 else "C"
+
+
+def old_manual(paths):
+    """Ручные данные из прошлых выгрузок: {компания: {колонка: значение}}."""
+    from openpyxl import load_workbook
+    keep = ["Волна вручную", "Приоритет вручную"] + LPR_COLS
+    out = {}
+    for p in paths:
+        if not p.exists():
+            continue
+        wb = load_workbook(p, read_only=True, data_only=True)
+        for ws in wb.worksheets:
+            rows = ws.iter_rows(values_only=True)
+            head = next(rows, None) or ()
+            for row in rows:
+                d = dict(zip(head, row))
+                filled = {k: d[k] for k in keep if d.get(k) not in (None, "")}
+                if d.get("Компания") and filled:
+                    out.setdefault(d["Компания"], {}).update(filled)
+    return out
+
+
+def step_v2():
+    from collections import Counter
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    rows = json.loads((WORK / "step3.json").read_text(encoding="utf-8"))
+    manual = old_manual([OUT, OUT_V2])
+    for r in rows:
+        r["_staff_v2"], (r[FLAGS[0]], r[FLAGS[1]], r[FLAGS[2]]), r["Приоритет"] = flags_v2(r)
+        r["Пометка"] = "; ".join(n for n in (r.get("Пометка") or "").split("; ")
+                                 if n and n not in OLD_NOTES)
+        m = manual.get(r["Компания"], {})
+        v = m.get("Приоритет вручную") or m.get("Волна вручную")
+        # «Волна вручную» из v1 (1/2/3) не совпадает со шкалой A/B/C — переносим как есть с подписью
+        r["_manual"] = (f"волна {v} (v1)" if v is not None and str(v) in ("1", "2", "3") else v)
+        r["_lpr"] = {k: m[k] for k in LPR_COLS if k in m}
+        if r.get("Лист") in ("Волна 1", "Волна 2", "Волна 3"):
+            r["Лист v2"] = r["Приоритет"]
+        else:
+            r["Лист v2"] = r.get("Лист")
+    order = lambda r: (r["_staff_v2"] is None, r["_staff_v2"] or 0, r["Компания"])  # noqa: E731
+    sheets = {k: sorted((r for r in rows if r.get("Лист v2") == k), key=order)
+              for k in ("A", "B", "C", "Ручная проверка")}
+    sheets["Исключены"] = sorted((r for r in rows if r.get("Лист v2") == "Исключены"),
+                                 key=lambda r: (r.get("Исключение") or "", r["Компания"]))
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    for k in ("A", "B", "C", "Ручная проверка", "Исключены"):
+        cols = COLS_V2 if k != "Исключены" else ["Компания", "Исключение"] + COLS_V2[1:]
+        ws = write_sheet(wb, k, sheets[k], cols, manual_col="Приоритет вручную",
+                         manual_opts='"A,B,C,исключить"')
+        for i, r in enumerate(sheets[k], 2):    # ручные данные — поверх пустых ячеек
+            for j, c in enumerate(cols, 1):
+                if c == "Приоритет вручную" and r["_manual"] is not None:
+                    ws.cell(i, j, r["_manual"])
+                elif c in r["_lpr"]:
+                    ws.cell(i, j, r["_lpr"][c])
+    ws = wb.create_sheet("Как считалось")
+    for a, b in HOW_V2:
+        ws.append([a, b])
+        if a and not b:
+            ws.cell(ws.max_row, 1).font = Font(bold=True)
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 120
+    for row in ws.iter_rows():
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    wb.save(OUT_V2)
+
+    print("листы:")
+    for k, v in sheets.items():
+        print(f"  {k:16s} {len(v)}")
+    for k in ("A", "B", "C"):
+        print(f"  {k}: флаги", dict(Counter(tuple(r[f] for f in FLAGS) for r in sheets[k]).most_common(6)))
+    print("перенесено ручных записей:", sum(1 for r in rows if r["_manual"] is not None or r["_lpr"]))
+    print("\nпервые 30 из A:")
+    for r in sheets["A"][:30]:
+        inc = f"{r['Доходы (ФНС)'] / 1e6:,.0f} млн".replace(",", " ")
+        print(f"  {r['Компания'][:34]:34s} | {r['Численность']:>4} | "
+              f"{r['ОКВЭД код']:8s} {(r.get('ОКВЭД расшифровка') or '')[:38]:38s} | {inc:>9s}")
+    print(f"файл: {OUT_V2}")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["step1"]:
@@ -1073,5 +1212,7 @@ if __name__ == "__main__":
         step3()
     elif a[:1] == ["xlsx"]:
         step_xlsx()
+    elif a[:1] == ["v2"]:
+        step_v2()
     else:
         print(__doc__)
