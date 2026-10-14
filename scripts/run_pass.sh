@@ -50,6 +50,15 @@ if [ -z "$MODE" ]; then
     N=${EXTRA#.env.search}
     XLOG="run_serp${N}_$STAMP.log"
     echo
+    if grep -qE '^COLLECT_ONLY=1' "$EXTRA"; then
+      # только сбор вакансий и компаний, без откликов
+      XLOG="collect${N}_$STAMP.log"
+      echo "=== сбор $N ($EXTRA) $(date +%T), лог $XLOG"
+      $PY -u ${0:A:h}/hh_collect.py $1 "$EXTRA" > "$XLOG" 2>&1
+      echo "=== завершился $(date +%T), код $?"
+      grep -A 20 '^остановка' "$XLOG"
+      continue
+    fi
     echo "=== доп. запрос $N ($EXTRA) $(date +%T), лог $XLOG"
     SEARCH_URL="$URL" $PY -u hh_searchapply.py > "$XLOG" 2>&1
     summary $? "$XLOG"
