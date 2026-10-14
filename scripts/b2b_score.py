@@ -1200,6 +1200,157 @@ def step_v2():
     print(f"файл: {OUT_V2}")
 
 
+# ---------- v3: ядро — до 500 человек, доходы до 3 млрд, ОКВЭД из списка (14.10.2026) ----------
+OUT_V3 = EXPORTS / "b2b_v3.xlsx"
+# код (префикс) → (группа, кто там, офферы); проверяются по порядку, первый подходящий
+OKVED_V3 = [
+    ("62.01", "ИТ", "разработка ПО: продуктовые компании, SaaS, студии", [7, 8, 9, 10, 2]),
+    ("62.0", "ИТ", "разработка ПО: продуктовые компании, SaaS, студии", [7, 8, 9, 10, 2]),
+    ("58.29", "ИТ", "издатели ПО, вендоры коробочных и облачных продуктов", [10, 9, 3]),
+    ("58.21", "ИТ", "геймдев", [4, 2, 1]),
+    ("63.11", "ИТ", "обработка данных, хостинг, SaaS, облачные сервисы", [1, 2, 4, 6]),
+    ("63.12", "ИТ", "веб-порталы, маркетплейсы, агрегаторы, сервисы объявлений", [1, 2, 4]),
+    ("62.09", "ИТ", "прочая ИТ-деятельность, часто стартапы с размытым профилем", [7, 10]),
+    ("62.03", "ИТ", "управление компьютерным оборудованием", [6, 5]),
+    ("47.91", "нагрузка", "интернет-магазины, e-com (сезонные пики)", [1, 2, 4]),
+    ("64.92", "нагрузка", "онлайн-МФО", [3, 1, 5]),
+    ("66.19", "нагрузка", "платёжные сервисы, процессинг, финтех", [3, 1, 2]),
+    ("66.12", "нагрузка", "брокеры, инвест-платформы", [3, 1]),
+    ("61.10", "нагрузка", "провайдеры, телеком, VPN, CDN", [6, 2, 5]),
+    ("61.90", "нагрузка", "провайдеры, телеком, VPN, CDN", [6, 2, 5]),
+    ("73.11", "нагрузка", "adtech, рекламные платформы, аналитика", [4, 2, 9]),
+    ("73.20", "нагрузка", "adtech, рекламные платформы, аналитика", [4, 2, 9]),
+    ("85.41", "нагрузка", "EdTech, онлайн-школы", [4, 7, 2]),
+    ("86.90", "нагрузка", "телемедицина, медтех (152-ФЗ, переезд в РФ-облака)", [3, 5]),
+    ("79.11", "нагрузка", "онлайн-бронирование, тревел-сервисы", [1, 4]),
+    ("79.90", "нагрузка", "онлайн-бронирование, тревел-сервисы", [1, 4]),
+    ("53.20", "нагрузка", "доставка, такси-агрегаторы, логистика с приложением", [1, 2, 9]),
+    ("49.32", "нагрузка", "доставка, такси-агрегаторы, логистика с приложением", [1, 2, 9]),
+]
+OFFER_NAMES = {n: name for n, name, _ in OFFERS}
+FLAGS_V3 = ["≤500 чел", "ОКВЭД из списка", "Доходы ≤3 млрд"]
+COLS_V3 = (["Компания", "Приоритет"] + FLAGS_V3 +
+           ["Приоритет вручную", "Сегмент", "Офферы по ОКВЭД", "Численность", "ОКВЭД",
+            "Доходы (ФНС)", "Сайт", "Ссылка на вакансию", "Зацепка", "Пометка", "ИНН", "Юрлицо",
+            "Уверенность ИНН"] + LPR_COLS)
+
+
+def okved_v3(code):
+    """(группа, кто там, офферы) для основного ОКВЭД или None. «62.0» у DaData — это 62.01."""
+    code = code or ""
+    for pref, group, who, offers in OKVED_V3:
+        if code == pref or code.startswith(pref + ".") or (pref == "62.0" and code == "62.0") \
+                or (len(pref) == 5 and code.startswith(pref)):
+            return group, who, offers
+    return None
+
+
+def flags_v3(r):
+    staff = r.get("Численность")
+    if staff is not None and staff < 10 or MANUAL.get(low(r["Компания"]), {}).get("size_unknown"):
+        staff = None
+    code, income = r.get("ОКВЭД код") or "", r.get("Доходы (ФНС)")
+    seg = okved_v3(code)
+    f_staff = "?" if staff is None else "да" if staff <= 500 else "нет"
+    f_okved = "?" if not code else "да" if seg else "нет"
+    f_income = "?" if income is None else "да" if income <= 3e9 else "нет"
+    yes = [f_staff, f_okved, f_income].count("да")
+    return staff, seg, (f_staff, f_okved, f_income), "A" if yes == 3 else "B" if yes == 2 else "C"
+
+
+def step_v3():
+    from collections import Counter
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font
+    rows = json.loads((WORK / "step3.json").read_text(encoding="utf-8"))
+    manual = old_manual([OUT, OUT_V2, OUT_V3])
+    for r in rows:
+        r["_staff_v2"], seg, flags, r["Приоритет"] = flags_v3(r)
+        r[FLAGS_V3[0]], r[FLAGS_V3[1]], r[FLAGS_V3[2]] = flags
+        r["Сегмент"] = f"{seg[0]}: {seg[1]}" if seg else ""
+        r["Офферы по ОКВЭД"] = "\n".join(f"{n}. {OFFER_NAMES[n]}" for n in seg[2]) if seg else ""
+        r["Пометка"] = "; ".join(n for n in (r.get("Пометка") or "").split("; ")
+                                 if n and n not in OLD_NOTES)
+        m = manual.get(r["Компания"], {})
+        v = m.get("Приоритет вручную") or m.get("Волна вручную")
+        r["_manual"] = (f"волна {v} (v1)" if v is not None and str(v) in ("1", "2", "3") else v)
+        r["_lpr"] = {k: m[k] for k in LPR_COLS if k in m}
+        r["Лист v2"] = (r["Приоритет"] if r.get("Лист") in ("Волна 1", "Волна 2", "Волна 3")
+                        else r.get("Лист"))
+    order = lambda r: (r["_staff_v2"] is None, r["_staff_v2"] or 0, r["Компания"])  # noqa: E731
+    sheets = {k: sorted((r for r in rows if r.get("Лист v2") == k), key=order)
+              for k in ("A", "B", "C", "Ручная проверка")}
+    sheets["Исключены"] = sorted((r for r in rows if r.get("Лист v2") == "Исключены"),
+                                 key=lambda r: (r.get("Исключение") or "", r["Компания"]))
+
+    WIDTH.update({"Сегмент": 34, "Офферы по ОКВЭД": 36})
+    WRAP.add("Офферы по ОКВЭД")
+    FLAGS.extend(f for f in FLAGS_V3 if f not in FLAGS)    # центрирование флагов в write_sheet
+    wb = Workbook()
+    wb.remove(wb.active)
+    for k in ("A", "B", "C", "Ручная проверка", "Исключены"):
+        cols = COLS_V3 if k != "Исключены" else ["Компания", "Исключение"] + COLS_V3[1:]
+        ws = write_sheet(wb, k, sheets[k], cols, manual_col="Приоритет вручную",
+                         manual_opts='"A,B,C,исключить"')
+        for i, r in enumerate(sheets[k], 2):
+            for j, c in enumerate(cols, 1):
+                if c == "Приоритет вручную" and r["_manual"] is not None:
+                    ws.cell(i, j, r["_manual"])
+                elif c in r["_lpr"]:
+                    ws.cell(i, j, r["_lpr"][c])
+    how = [
+        ("Кто попадает", HOW_V2[0][1]),
+        ("", ""),
+        ("Флаги (да / нет / ?)", ""),
+        ("≤500 чел", "численность по ФНС (sshr) на 31.12.2025 ≤ 500. Нет данных или в юрлице "
+                     "< 10 человек → «?»"),
+        ("ОКВЭД из списка", "основной ОКВЭД есть в таблице ниже (ИТ-ядро или высоконагруженные "
+                            "не-ИТ); ИНН не найден → «?»"),
+        ("Доходы ≤3 млрд", "доходы по ФНС (revexp) ≤ 3 000 000 000 ₽: деньги есть, своей "
+                           "платформенной команды ещё нет; нет данных → «?»"),
+        ("", ""),
+        ("Приоритет", ""),
+        ("A", "все три флага «да»"),
+        ("B", "два «да», третий «нет» или «?»"),
+        ("C", "остальные"),
+        ("Сортировка", "внутри приоритета — по численности по возрастанию, неизвестная в конце"),
+        ("Приоритет вручную", "если заполнен — главнее расчётного (A / B / C / исключить)"),
+        ("", ""),
+        ("ОКВЭД → сегмент → офферы", ""),
+    ] + [(pref, f"[{group}] {who} → офферы {', '.join(map(str, offers))}")
+         for pref, group, who, offers in OKVED_V3 if pref != "62.0"] + [
+        ("", ""),
+        ("Офферы", ""),
+    ] + [(str(n), name) for n, name, _ in OFFERS] + [("", "")] + HOW_V2[-9:]
+    ws = wb.create_sheet("Как считалось")
+    for a, b in how:
+        ws.append([a, b])
+        if a and not b:
+            ws.cell(ws.max_row, 1).font = Font(bold=True)
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 120
+    for row in ws.iter_rows():
+        for c in row:
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+    wb.save(OUT_V3)
+
+    print("листы:")
+    for k, v in sheets.items():
+        print(f"  {k:16s} {len(v)}")
+    for k in ("A", "B", "C"):
+        print(f"  {k}: флаги", dict(Counter(tuple(r[f] for f in FLAGS_V3)
+                                            for r in sheets[k]).most_common(6)))
+    print("  A по сегментам:", dict(Counter(r["Сегмент"].split(":")[0] for r in sheets["A"])))
+    print("  A по ОКВЭД:", dict(Counter((r.get("ОКВЭД код") or "")[:5] for r in sheets["A"]).most_common(10)))
+    print("перенесено ручных записей:", sum(1 for r in rows if r["_manual"] is not None or r["_lpr"]))
+    print("\nпервые 30 из A:")
+    for r in sheets["A"][:30]:
+        inc = f"{r['Доходы (ФНС)'] / 1e6:,.0f} млн".replace(",", " ")
+        print(f"  {r['Компания'][:32]:32s} | {r['Численность']:>4} | {r['ОКВЭД код']:8s} | {inc:>9s} | "
+              + ",".join(o.split(".")[0] for o in r["Офферы по ОКВЭД"].split("\n")))
+    print(f"файл: {OUT_V3}")
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if a[:1] == ["step1"]:
@@ -1214,5 +1365,7 @@ if __name__ == "__main__":
         step_xlsx()
     elif a[:1] == ["v2"]:
         step_v2()
+    elif a[:1] == ["v3"]:
+        step_v3()
     else:
         print(__doc__)
