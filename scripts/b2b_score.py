@@ -429,6 +429,42 @@ def step2(limit=None):
     print(f"\nрезультат: {out}")
 
 
+def step2_excluded():
+    """Дообогатить исключённые на шаге 1 (их в шаге 2 не трогали): ИНН через DaData, данные ФНС.
+    Причину исключения не меняем, на сайты не ходим. Пишет в step2b.json."""
+    import sqlite3
+    from collections import Counter
+    path = WORK / "step2b.json"
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    key = dadata_key()
+    cache = json.loads(CACHE.read_text(encoding="utf-8")) if CACHE.exists() else {}
+    db = sqlite3.connect(FNS_DB)
+    todo = [r for r in rows if r["Исключение"] not in ("", "посредник?") and not r.get("ИНН")]
+    stat = Counter()
+    for r in todo:
+        best, conf, top, why, tried = None, "ручная", [], "", []
+        for q in queries(r["Компания"]):
+            res = cached(cache, "party10", q, lambda: requests_post(
+                key, "suggest/party", {"query": q, "count": 10}))
+            tried.append(q)
+            best, conf, top, why = match(q, (res or {}).get("suggestions") or [], db)
+            if best or top:
+                break
+        r.update({"Уверенность сопоставления": conf, "Запросы DaData": " / ".join(tried),
+                  "Кандидаты (топ-3)": "\n".join(describe(c) for c in top) if not best else ""})
+        stat[conf] += 1
+        if best:
+            d = best["s"]["data"]
+            code = d.get("okved") or ""
+            r.update({
+                "ИНН": d.get("inn"), "Юрлицо": best["s"]["value"], "ОКВЭД код": code,
+                "ОКВЭД расшифровка": okved_name(cache, key, code), "Регион": region(d),
+                "Статус": "действующая", "Численность": best["staff"],
+                "Доходы (ФНС)": best["income"]})
+    path.write_text(json.dumps(rows, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    print(f"исключённых без ИНН: {len(todo)} → {dict(stat)}")
+
+
 # ---------- шаг 2.1: ИНН с сайта ----------
 # Сайты нашёл веб-поиск (sites_out_*.json): {company, site, inn, legal, foreign, note}.
 SITE_CACHE = WORK / "site_cache.json"
@@ -1288,7 +1324,9 @@ def step_v3():
     wb = Workbook()
     wb.remove(wb.active)
     for k in ("A", "B", "C", "Ручная проверка", "Исключены"):
-        cols = COLS_V3 if k != "Исключены" else ["Компания", "Исключение"] + COLS_V3[1:]
+        cols = COLS_V3 if k != "Исключены" else (
+            ["Компания", "Исключение"] + COLS_V3[1:COLS_V3.index("Уверенность ИНН") + 1]
+            + ["Кандидаты ИНН"] + COLS_V3[COLS_V3.index("Уверенность ИНН") + 1:])
         if k == "B":
             cols = [c for c in cols if c != "Сегмент"]
         ws = write_sheet(wb, k, sheets[k], cols, manual_col="Приоритет вручную",
@@ -1356,6 +1394,8 @@ if __name__ == "__main__":
         step2(int(a[a.index("--limit") + 1]) if "--limit" in a else None)
     elif a[:1] == ["step2b"]:
         step2b()
+    elif a[:1] == ["step2x"]:
+        step2_excluded()
     elif a[:1] == ["step3"]:
         step3()
     elif a[:1] == ["xlsx"]:
