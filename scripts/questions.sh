@@ -17,6 +17,9 @@ case "$1" in
     for a in $ACCS; do
       echo "== $a"
       (cd $BASE/$a && $PY hh_answers.py --new 2>&1 | grep -E "выгружено|draft|needs_input|выбором|заполни")
+      # правило «повторы не копировать, а пересказывать» — в шапку свежего файла
+      f=$(ls -t $BASE/$a/questions/new/*.txt 2>/dev/null | head -1)
+      [ -n "$f" ] && $PY $SCRIPTS/questions_note.py "$f"
     done
     ;;
   take)
