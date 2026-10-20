@@ -604,8 +604,13 @@ def letter_required(page):
     return bool(LETTER_REQUIRED_RE.search(txt or ""))
 
 
+# Множитель всех пауз pause(): 1 — как было, 0.5 — вдвое быстрее. Короче паузы —
+# чаще капча hh. Фиксированные wait_for_timeout на отрисовку не масштабируются.
+PAUSE_SCALE = float(os.getenv("PAUSE_SCALE", "1") or 1)
+
+
 def pause(a, b):
-    time.sleep(random.uniform(a, b))
+    time.sleep(random.uniform(a, b) * PAUSE_SCALE)
 
 
 # ================= BitBrowser =================
