@@ -543,6 +543,28 @@ def foryou_url(page):
     return urljoin("https://hh.ru", href.split("&hhtmFrom")[0])
 
 
+GOTO_TRIES = 3
+
+
+def goto_retry(page, url, tries=GOTO_TRIES):
+    """Загрузить страницу выдачи, переживая разовые таймауты hh.
+
+    Раньше один зависший ответ hh (Page.goto: Timeout) ронял весь прогон
+    посреди выдачи. Теперь до трёх попыток с паузой; не вышло — False,
+    и обход выдачи заканчивается штатно, дальше идут отложенные.
+    """
+    for i in range(1, tries + 1):
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            return True
+        except Exception as e:                     # TimeoutError, net::ERR_*
+            print(f"    страница не загрузилась ({type(e).__name__}), "
+                  f"попытка {i} из {tries}", flush=True)
+            if i < tries:
+                page.wait_for_timeout(10000)
+    return False
+
+
 def run(page, db, pages, url=None, home=False):
     """home=True — работаем на самой главной, не уходя в поиск.
 
@@ -573,10 +595,11 @@ def run(page, db, pages, url=None, home=False):
     # собственного «отправлено» получасовой давности.
     handled = set()
     for n in range(pages):
-        if home:
-            page.goto("https://hh.ru", wait_until="domcontentloaded")
-        else:
-            page.goto(f"{url}{sep}page={n}", wait_until="domcontentloaded")
+        target = "https://hh.ru" if home else f"{url}{sep}page={n}"
+        if not goto_retry(page, target):
+            print(f"{'круг' if home else 'страница'} {n}: hh не отдал страницу "
+                  f"за {GOTO_TRIES} попытки — заканчиваю обход выдачи")
+            break
         hh.pause(3, 6)
         mark_tab(page, hh.ACCOUNT_NAME)
         cards = cards_on_page(page)
