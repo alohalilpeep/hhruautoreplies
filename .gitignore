@@ -42,6 +42,14 @@ parked.json
 # снимки живых тестов
 tests/artifacts/
 
+# Изображения и статистика независимых OCR-экспериментов
+ocr_images/
+ocr_stats.csv
+polar_images/
+
+# Снимки защитной капчи для ручного анализа
+captcha_images/
+
 # личные данные: имя, контакты, дата рождения
 profile.txt
 

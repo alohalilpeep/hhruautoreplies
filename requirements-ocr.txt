@@ -1,0 +1,6 @@
+# Захват DOM использует уже применяемый в проекте Playwright.
+Pillow>=10.0
+playwright>=1.40
+pytesseract>=0.3.13
+opencv-python-headless>=4.10
+numpy>=2.0

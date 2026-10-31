@@ -12,6 +12,7 @@ import sqlite3
 import time
 import datetime as dt
 from pathlib import Path
+from uuid import uuid4
 
 import requests
 import hh_human as human
@@ -58,6 +59,11 @@ NAV_TIMEOUT = int(os.getenv("NAV_TIMEOUT", "90000"))
 # Сколько секунд ждать, пока человек пройдёт капчу, прежде чем сдаться.
 # Ноль — не ждать вовсе, останавливаться сразу, как было раньше.
 CAPTCHA_WAIT = float(os.getenv("CAPTCHA_WAIT", "1800"))
+# Снимки капчи собираются пассивно при первом обнаружении. Относительный путь
+# считается от каталога проекта; распознавание и отправка ответа не выполняются.
+_captcha_dir = Path(os.getenv("CAPTCHA_IMAGE_DIR", "captcha_images")).expanduser()
+CAPTCHA_IMAGE_DIR = (_captcha_dir if _captcha_dir.is_absolute()
+                     else Path(__file__).resolve().parent / _captcha_dir)
 # Сколько секунд ждать реакции на «Откликнуться». Пяти не хватало:
 # попап отклика рисуется дольше, скрипт считал клик неудачным, жал
 # повторно — и закрывал уже открывшийся попап. Проверено вживую:
@@ -532,19 +538,68 @@ CAPTCHA_RE = re.compile(
     r"|captcha|капч", re.I)
 CAPTCHA_SEL = ('[data-qa*="captcha"], [class*="captcha"], '
                'iframe[src*="captcha"], iframe[src*="recaptcha"]')
+CAPTCHA_IMAGE_SEL = ('[data-qa*="captcha"] img, [class*="captcha"] img, '
+                     'img[src*="captcha"], img[alt*="captcha" i], '
+                     'canvas[data-qa*="captcha"], canvas[class*="captcha"]')
+_CAPTCHA_CAPTURED_PAGES = set()
+
+
+def capture_captcha(page):
+    """Сохранить видимую область капчи, а если её не нашли — всю страницу.
+
+    Возвращает Path при успехе и None при ошибке. Ошибка диагностического
+    снимка никогда не должна останавливать основной прогон.
+    """
+    path = None
+    try:
+        CAPTCHA_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        path = CAPTCHA_IMAGE_DIR / f"captcha_{stamp}_{uuid4().hex[:8]}.png"
+        for selector in (CAPTCHA_IMAGE_SEL, CAPTCHA_SEL):
+            locators = page.locator(selector)
+            for index in range(locators.count()):
+                locator = locators.nth(index)
+                try:
+                    if not locator.is_visible():
+                        continue
+                    locator.screenshot(path=str(path), type="png", timeout=5000)
+                    print(f"снимок капчи сохранён: {path}")
+                    return path
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    continue
+        page.screenshot(path=str(path), type="png", timeout=5000)
+        print(f"снимок страницы с капчей сохранён: {path}")
+        return path
+    except Exception as exc:
+        try:
+            if path is not None:
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        print(f"не удалось сохранить снимок капчи: {exc}")
+        return None
 
 
 def captcha_present(page):
     """Капча на странице. Проверка дешёвая, зовём часто."""
     try:
-        if "captcha" in page.url.lower():
-            return True
+        found = "captcha" in page.url.lower()
         # Именно видимый: на странице логина hh держит скрытый пустой
         # account-login-recaptcha, и проверка по наличию в разметке
         # объявляла капчу там, где её нет.
-        if visible(page, CAPTCHA_SEL):
-            return True
-        return bool(visible_text(page, CAPTCHA_RE))
+        found = found or visible(page, CAPTCHA_SEL) or bool(visible_text(page, CAPTCHA_RE))
+        page_id = id(page)
+        if found and page_id not in _CAPTCHA_CAPTURED_PAGES:
+            _CAPTCHA_CAPTURED_PAGES.add(page_id)
+            try:
+                capture_captcha(page)
+            except Exception as exc:
+                # Диагностический код не должен скрывать обнаруженную капчу.
+                print(f"не удалось сохранить снимок капчи: {exc}")
+        elif not found:
+            _CAPTCHA_CAPTURED_PAGES.discard(page_id)
+        return found
     except Exception:
         return False
 
